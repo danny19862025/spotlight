@@ -1,0 +1,25 @@
+# Build output
+/target/
+
+# Runtime data and private local configuration (never distribute)
+data.json
+data.tmp
+/quick-notes/
+/scripts/
+/.local/
+/.config/
+/.obsidian/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Generated desktop screenshots can contain personal information
+/preview.png
+/currency-preview.png
+
+# Editor and operating-system files
+*.swp
+*~
+.DS_Store

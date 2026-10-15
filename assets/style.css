@@ -1,0 +1,25 @@
+window { background: transparent; color: #eeedf2; font-family: Inter, "Noto Sans", sans-serif; font-size: 13px; }
+.shell { background: #17171c; border: 1px solid #3a3a43; border-radius: 16px; box-shadow: 0 12px 40px #00000055; }
+.top { padding: 16px 20px; border-bottom: 1px solid #303038; }
+.brand { background: #ec5862; color: white; border-radius: 9px; padding: 7px; font-weight: 800; font-size: 21px; }
+.search { background: transparent; border: 0; box-shadow: none; font-size: 21px; color: #f4f3f8; min-height: 40px; caret-color: #ec5862; }
+.search:focus { outline: none; }
+.section { color: #9c9ca9; font-size: 11px; font-weight: 600; padding: 12px 20px 8px; }
+list { background: transparent; padding: 0 10px; }
+row { background: transparent; border-radius: 8px; padding: 8px 10px; margin: 2px 0; min-height: 37px; }
+row:selected { background: #34343f; color: #ffffff; }
+row:hover { background: #292932; }
+.item-title { font-weight: 500; font-size: 14px; }
+.subtitle { color: #91919e; font-size: 11px; }
+.badge { color: #92929e; font-size: 11px; padding-right: 8px; }
+.tile { background: #292933; border-radius: 8px; padding: 6px; min-width: 22px; min-height: 22px; color: #c9b6fa; font-size: 19px; }
+.footer { padding: 10px 17px; border-top: 1px solid #303038; color: #a5a5b1; font-size: 11px; }
+.key { background: #303039; border: 1px solid #454550; border-radius: 4px; padding: 2px 5px; color: #c6c6cf; font-size: 10px; }
+button { background: #292932; color: #d8d8e2; border: 1px solid #42424e; border-radius: 6px; padding: 6px 10px; box-shadow: none; }
+button:hover { background: #3a3a46; }
+.flat { background: transparent; border: none; padding: 4px 8px; }
+.accent { background: #d94f5e; color: white; border-color: #d94f5e; }
+.editor { padding: 20px; background: #1e1e25; border-radius: 12px; }
+.editor entry, .editor textview, .editor textview text { background: #292932; color: #eeeef5; border-radius: 6px; padding: 8px; }
+.notice { color: #f0a7ac; padding: 6px 20px; }
+scrollbar slider { min-width: 6px; min-height: 6px; }
