@@ -4,7 +4,19 @@ A native Linux launcher written in Rust and GTK 4, with a dark Raycast-style int
 
 ## Build and install
 
-Requires Rust, GTK 4.10+ development libraries, and pkg-config. Run `cargo fetch`, then `sh install.sh`. Launch `~/.local/bin/spotlight` or find **Spotlight** in the applications menu. On KDE, run `~/.local/bin/spotlight --install-shortcut` to register **Meta+Space**. Existing shortcut conflicts are preserved.
+Follow the **[Linux installation guide](docs/INSTALL.md)** for Ubuntu/Kubuntu and derivatives, Debian, Arch and derivatives, Fedora, Fedora Atomic, openSUSE, Void, Gentoo, Alpine, NixOS, and other distributions. It includes dependency commands, Rust setup, shortcuts, updates, troubleshooting, and uninstall instructions.
+
+Requires current stable Rust, GTK 4.10+ development libraries, a C compiler/linker, and pkg-config. Once dependencies are installed:
+
+```sh
+git clone https://github.com/danny19862025/spotlight.git
+cd spotlight
+cargo fetch --locked
+sh install.sh
+"$HOME/.local/bin/spotlight"
+```
+
+Install as your normal user, without sudo. On KDE, run `~/.local/bin/spotlight --install-shortcut` to register **Meta+Space**. Existing shortcut conflicts are preserved. Other desktops need a custom shortcut in their keyboard settings; KDE integrations require KDE services.
 
 The first launch stays running; launching it again toggles the panel. Escape hides it. Use **Quit Spotlight** to exit. No automatic login startup is installed.
 
