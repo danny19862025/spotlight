@@ -1,3 +1,4 @@
+mod about;
 mod boosters;
 mod caffeinate;
 mod clipimage;
@@ -8,6 +9,8 @@ mod desktop;
 mod emoji;
 mod extensions;
 mod fonts;
+mod guide;
+mod interface;
 mod measure;
 mod offline;
 mod pim;
@@ -17,6 +20,7 @@ mod search;
 mod shortcut;
 mod snippets;
 mod texttools;
+mod theme;
 mod wasmplugins;
 mod windowing;
 use core::{Store, TextItem};
@@ -105,6 +109,7 @@ enum Action {
     Window(&'static str),
     New(Page),
     Settings,
+    Walkthrough,
     Quit,
     MoreResults,
     FontPreview(String),
@@ -168,7 +173,11 @@ struct Ui {
     apps: RefCell<Vec<Item>>,
     fonts: Vec<String>,
     font_css: gtk::CssProvider,
+    theme_css: gtk::CssProvider,
+    interface_css: gtk::CssProvider,
+    guide_step: Cell<usize>,
     visible: RefCell<Vec<Item>>,
+    rendered_search: RefCell<Option<(Page, String)>>,
     files: RefCell<Vec<PathBuf>>,
     file_loading: RefCell<bool>,
     files_ready: RefCell<bool>,
@@ -328,6 +337,7 @@ impl Ui {
             .iter()
             .map(|(p, _)| p)
             .chain(files.iter())
+            .filter(|p| !core::hidden_path(p))
             .filter(|p| seen.insert(p.to_path_buf()))
             .filter_map(|path| {
                 let name = path.file_name()?.to_string_lossy();
@@ -2294,6 +2304,16 @@ impl Ui {
     }
     fn root(&self) -> Vec<Item> {
         let mut out = self.apps.borrow().clone();
+        let mut help = item(
+            "walkthrough",
+            "Getting Started",
+            "A short walkthrough of Spotlight · F1",
+            "help-browser-symbolic",
+            "Guide",
+            Action::Walkthrough,
+        );
+        help.keywords = "help walkthrough basics tutorial getting started".into();
+        out.push(help);
         out.extend(self.extension_menu());
         out.push(item(
             "emoji-tones",
@@ -3271,6 +3291,12 @@ impl Ui {
         let query = self.search.text().to_string();
         let q = query.trim();
         let page = *self.page.borrow();
+        let selected = self
+            .rendered_search
+            .borrow()
+            .as_ref()
+            .filter(|(previous_page, previous_query)| *previous_page == page && previous_query == q)
+            .and_then(|_| self.selected().map(|item| item.id));
         let explicit_lookup = page == Page::Root
             && (boosters::Query::parse(q).is_some() || extensions::query(q).is_some());
         if self.content_session.borrow().as_ref().is_some_and(|s| {
@@ -3468,7 +3494,13 @@ impl Ui {
                     })
             });
         } else if page != Page::Colors || !q.is_empty() {
-            ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+            let apps_first = page == Page::Root && !q.is_empty();
+            ranked.sort_by(|a, b| {
+                (apps_first && matches!(b.1.action, Action::App(_)))
+                    .cmp(&(apps_first && matches!(a.1.action, Action::App(_))))
+                    .then_with(|| b.0.cmp(&a.0))
+                    .then_with(|| a.1.title.cmp(&b.1.title))
+            });
         }
         let limit = if matches!(page, Page::Emoji | Page::Fonts) {
             self.result_limit.get()
@@ -3646,7 +3678,11 @@ impl Ui {
             });
         }
         *self.visible.borrow_mut() = results;
-        if let Some(row) = self.list.row_at_index(0) {
+        *self.rendered_search.borrow_mut() = Some((page, q.to_string()));
+        let selected_index = selected
+            .and_then(|id| self.visible.borrow().iter().position(|item| item.id == id))
+            .unwrap_or(0);
+        if let Some(row) = self.list.row_at_index(selected_index as i32) {
             self.list.select_row(Some(&row));
         }
         self.hint.set_text(
@@ -3664,6 +3700,7 @@ impl Ui {
             .map_err(|e| e.to_string())?;
         if uri.starts_with("file:")
             && let Some(path) = gio::File::for_uri(uri).path()
+            && !core::hidden_path(&path)
             && path.exists()
         {
             gtk::RecentManager::default().add_item(uri);
@@ -3860,6 +3897,10 @@ impl Ui {
             self.save();
         }
         let result: Result<(), String> = match i.action {
+            Action::Walkthrough => {
+                self.settings_at(2);
+                return;
+            }
             Action::Extension(manifest) => {
                 self.open_extension(manifest);
                 return;
@@ -4251,13 +4292,56 @@ impl Ui {
         });
         dialog.present();
     }
+    fn set_theme(&self, theme: theme::Theme) -> Result<(), String> {
+        if !self.can_save {
+            return Err("Saved data is unreadable; cannot change the theme".into());
+        }
+        let css = theme.css()?;
+        let mut store = self.store.borrow_mut();
+        let previous = std::mem::replace(&mut store.theme, theme);
+        if let Err(error) = store.save() {
+            store.theme = previous;
+            return Err(error);
+        }
+        self.theme_css.load_from_data(&css);
+        Ok(())
+    }
+    fn set_interface(&self, preferences: interface::Preferences) -> Result<(), String> {
+        if !self.can_save {
+            return Err("Saved data is unreadable; cannot change the interface".into());
+        }
+        let preferences = preferences.normalized();
+        let mut store = self.store.borrow_mut();
+        let previous = std::mem::replace(&mut store.interface, preferences);
+        if let Err(error) = store.save() {
+            store.interface = previous;
+            return Err(error);
+        }
+        drop(store);
+        self.interface_css.load_from_data(&preferences.css());
+        let (width, height) = preferences.dimensions();
+        interface::fit_window(&self.window, width, height);
+        for window in gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|w| w.downcast::<gtk::Window>().ok())
+        {
+            if window.title().as_deref() == Some("Spotlight Settings") {
+                let scale = i32::from(preferences.scale);
+                interface::fit_window(&window, 640 * scale / 100, 740 * scale / 100);
+            }
+        }
+        Ok(())
+    }
     fn settings(self: &Rc<Self>) {
+        self.settings_at(0);
+    }
+    fn settings_at(self: &Rc<Self>, tab: u32) {
         let dialog = gtk::Window::builder()
             .title("Spotlight Settings")
             .transient_for(&self.window)
             .modal(true)
-            .default_width(560)
-            .default_height(660)
+            .default_width(640)
+            .default_height(740)
             .build();
         let panel = gtk::Box::new(gtk::Orientation::Vertical, 16);
         panel.add_css_class("editor");
@@ -4487,15 +4571,146 @@ impl Ui {
             ui.error("Application list refreshed. Reopen file search to rebuild the index.");
         });
         panel.append(&refresh);
-        let close = gtk::Button::with_label("Done");
-        let d = dialog.clone();
-        close.connect_clicked(move |_| d.close());
-        panel.append(&close);
         let scroll = gtk::ScrolledWindow::builder()
             .child(&panel)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
-        dialog.set_child(Some(&scroll));
+        let tabs = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .transition_duration(160)
+            .vexpand(true)
+            .build();
+        tabs.set_widget_name("settings-pages");
+        tabs.add_titled(&scroll, Some("general"), "General");
+        let weak = Rc::downgrade(self);
+        let window_panel = interface::panel(self.store.borrow().interface, move |preferences| {
+            weak.upgrade()
+                .ok_or("Spotlight has closed")?
+                .set_interface(preferences)
+        });
+        let window_scroll = gtk::ScrolledWindow::builder()
+            .child(&window_panel)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        tabs.add_titled(&window_scroll, Some("window"), "Window");
+        let weak = Rc::downgrade(self);
+        let theme_panel = theme::panel(self.store.borrow().theme.clone(), move |theme| {
+            weak.upgrade()
+                .ok_or("Spotlight has closed")?
+                .set_theme(theme)
+        });
+        let theme_scroll = gtk::ScrolledWindow::builder()
+            .child(&theme_panel)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        tabs.add_titled(&theme_scroll, Some("theme"), "Theme");
+        let app = {
+            let apps = self.apps.borrow();
+            apps.iter()
+                .find(|app| app.title.to_lowercase().contains("firefox"))
+                .or_else(|| apps.first())
+                .map(|app| app.title.clone())
+                .unwrap_or_else(|| "Firefox".into())
+        };
+        let weak = Rc::downgrade(self);
+        let on_change = move |step| {
+            if let Some(ui) = weak.upgrade() {
+                ui.guide_step.set(step);
+            }
+        };
+        let weak = Rc::downgrade(self);
+        let parent = dialog.downgrade();
+        let pages = tabs.downgrade();
+        let guide = guide::panel(app, self.guide_step.get(), on_change, move |action| {
+            let Some(ui) = weak.upgrade() else { return };
+            if matches!(action, guide::Action::Theme) {
+                if let Some(tabs) = pages.upgrade() {
+                    tabs.set_visible_child_name("theme");
+                }
+                return;
+            }
+            if let Some(dialog) = parent.upgrade() {
+                dialog.close();
+            }
+            match action {
+                guide::Action::Search(query) => {
+                    ui.page(Page::Root);
+                    ui.search.set_text(&query);
+                    ui.search.set_position(-1);
+                }
+                guide::Action::Clipboard => ui.page(Page::Clipboard),
+                guide::Action::Finish => {
+                    ui.guide_step.set(0);
+                    ui.page(Page::Root);
+                }
+                guide::Action::Theme => unreachable!(),
+            }
+            ui.window.present();
+            ui.search.grab_focus();
+        });
+        let guide_scroll = gtk::ScrolledWindow::builder()
+            .child(&guide)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        tabs.add_titled(&guide_scroll, Some("guide"), "Guide");
+        let about_scroll = gtk::ScrolledWindow::builder()
+            .child(&about::panel())
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        tabs.add_titled(&about_scroll, Some("about"), "About");
+        tabs.set_visible_child_name(
+            ["general", "theme", "guide", "about", "window"]
+                .get(tab as usize)
+                .copied()
+                .unwrap_or("general"),
+        );
+        let layout = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        layout.add_css_class("settings-shell");
+        let heading = gtk::Box::new(gtk::Orientation::Vertical, 5);
+        heading.add_css_class("settings-heading");
+        let title = gtk::Label::new(Some("Settings"));
+        title.set_xalign(0.);
+        title.add_css_class("guide-title");
+        heading.append(&title);
+        let subtitle = gtk::Label::new(Some("Make Spotlight feel like home."));
+        subtitle.set_xalign(0.);
+        subtitle.add_css_class("subtitle");
+        heading.append(&subtitle);
+        layout.append(&heading);
+        let navigation = gtk::StackSwitcher::builder().stack(&tabs).build();
+        navigation.add_css_class("settings-tabs");
+        navigation.set_widget_name("settings-navigation");
+        layout.append(&navigation);
+        layout.append(&tabs);
+        let done = gtk::Button::with_label("Done");
+        done.set_halign(gtk::Align::End);
+        let parent = dialog.downgrade();
+        done.connect_clicked(move |_| {
+            if let Some(dialog) = parent.upgrade() {
+                dialog.close();
+            }
+        });
+        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        footer.add_css_class("settings-footer");
+        done.set_hexpand(true);
+        footer.append(&done);
+        layout.append(&footer);
+        dialog.set_child(Some(&layout));
+        let keys = gtk::EventControllerKey::new();
+        let parent = dialog.downgrade();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                if let Some(dialog) = parent.upgrade() {
+                    dialog.close();
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        dialog.add_controller(keys);
+        let scale = i32::from(self.store.borrow().interface.normalized().scale);
+        interface::fit_window(&dialog, 640 * scale / 100, 740 * scale / 100);
         dialog.present();
     }
     fn actions(self: &Rc<Self>, button: &gtk::Button) {
@@ -4778,6 +4993,18 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         .resizable(false)
         .build();
     let font_css = gtk::CssProvider::new();
+    let theme_css = gtk::CssProvider::new();
+    let interface_css = gtk::CssProvider::new();
+    gtk::style_context_add_provider_for_display(
+        &gdk::Display::default().expect("Display"),
+        &interface_css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 2,
+    );
+    gtk::style_context_add_provider_for_display(
+        &gdk::Display::default().expect("Display"),
+        &theme_css,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+    );
     gtk::style_context_add_provider_for_display(
         &gdk::Display::default().expect("Display"),
         &font_css,
@@ -4794,7 +5021,7 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     let shell = gtk::Box::new(gtk::Orientation::Vertical, 0);
     shell.add_css_class("shell");
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    top.add_css_class("top");
+    top.add_css_class("launcher-top");
     let back = gtk::Button::from_icon_name("go-previous-symbolic");
     back.add_css_class("flat");
     back.set_visible(false);
@@ -4836,7 +5063,7 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         .child(&list)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
-        .min_content_height(365)
+        .min_content_height(240)
         .build();
     shell.append(&scroll);
     let notice = gtk::Label::new(None);
@@ -4891,6 +5118,18 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     {
         font_css.load_from_data(&fonts::css(family));
     }
+    match store.theme.css() {
+        Ok(css) => theme_css.load_from_data(&css),
+        Err(error) => {
+            eprintln!("Invalid saved theme; using default colors: {error}");
+            theme_css.load_from_data(&theme::Theme::default().css().unwrap());
+            store.theme = theme::Theme::default();
+        }
+    }
+    store.interface = store.interface.normalized();
+    interface_css.load_from_data(&store.interface.css());
+    let (width, height) = store.interface.dimensions();
+    interface::fit_window(&window, width, height);
     let ui = Rc::new(Ui {
         window,
         search,
@@ -4908,7 +5147,11 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         apps: RefCell::new(applications()),
         fonts: installed_fonts,
         font_css,
+        theme_css,
+        interface_css,
+        guide_step: Cell::new(0),
         visible: RefCell::new(Vec::new()),
+        rendered_search: RefCell::new(None),
         files: RefCell::new(Vec::new()),
         file_loading: RefCell::new(false),
         files_ready: RefCell::new(false),
@@ -4977,6 +5220,17 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
             u.launch(i);
         }
     });
+    let motion = gtk::EventControllerMotion::new();
+    let list = ui.list.downgrade();
+    motion.connect_motion(move |_, _, y| {
+        if let Some(list) = list.upgrade()
+            && let Some(row) = list.row_at_y(y.floor() as i32)
+            && row.is_selectable()
+        {
+            list.select_row(Some(&row));
+        }
+    });
+    ui.list.add_controller(motion);
     let u = Rc::clone(&ui);
     ui.back.connect_clicked(move |_| u.page(Page::Root));
     let u = Rc::clone(&ui);
@@ -4999,6 +5253,10 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     let action_button = actions.clone();
     keys.connect_key_pressed(move |_, key, _, mods| {
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
+        if key == gdk::Key::F1 {
+            u.settings_at(2);
+            return glib::Propagation::Stop;
+        }
         if key == gdk::Key::Escape {
             if *u.page.borrow() != Page::Root {
                 u.page(Page::Root);
@@ -5897,6 +6155,252 @@ fn smoke_plus(ui: Rc<Ui>) {
         glib::ControlFlow::Continue
     });
 }
+fn smoke_interface(ui: Rc<Ui>) {
+    assert!(core::data_dir().starts_with("/tmp"));
+    ui.settings_at(4);
+    let base_size = Rc::new(Cell::new((0, 0)));
+    let mut phase = 0;
+    glib::timeout_add_local(Duration::from_millis(450), move || {
+        match phase {
+            0 => {
+                base_size.set((ui.window.width(), ui.window.height()));
+                let settings = test_settings_window();
+                capture_test_window(&settings, "/tmp/spotlight-window-settings.png");
+                test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "window-expanded"
+                })
+                .unwrap()
+                .downcast::<gtk::ToggleButton>()
+                .unwrap()
+                .set_active(true);
+                test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "interface-size"
+                })
+                .unwrap()
+                .downcast::<gtk::DropDown>()
+                .unwrap()
+                .set_selected(3);
+                assert_eq!(
+                    ui.store.borrow().interface,
+                    interface::Preferences::default(),
+                    "Draft controls wait for Apply"
+                );
+                test_named_button(&settings, "interface-apply").emit_clicked();
+            }
+            1 => {
+                let preferences = interface::Preferences {
+                    mode: interface::WindowMode::Expanded,
+                    scale: 125,
+                };
+                assert_eq!(Store::load().unwrap().interface, preferences);
+                assert!(
+                    ui.window.width() > base_size.get().0,
+                    "Expanded increases width"
+                );
+                assert!(
+                    ui.window.height() > base_size.get().1,
+                    "Expanded increases height"
+                );
+                capture_test_window(
+                    ui.window.upcast_ref(),
+                    "/tmp/spotlight-expanded-interface.png",
+                );
+                let settings = test_settings_window();
+                let save = test_named_button(&settings, "interface-apply");
+                save.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+            }
+            2 => {
+                let settings = test_settings_window();
+                capture_test_window(&settings, "/tmp/spotlight-window-hover.png");
+                settings.close();
+                ui.settings_at(4);
+            }
+            3 => {
+                let settings = test_settings_window();
+                let expanded = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "window-expanded"
+                })
+                .unwrap()
+                .downcast::<gtk::ToggleButton>()
+                .unwrap();
+                assert!(expanded.is_active(), "Reopening restores saved mode");
+                let size = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "interface-size"
+                })
+                .unwrap()
+                .downcast::<gtk::DropDown>()
+                .unwrap();
+                assert_eq!(
+                    size.selected(),
+                    3,
+                    "Reopening restores saved interface size"
+                );
+                test_named_button(&settings, "interface-reset").emit_clicked();
+                assert_eq!(size.selected(), 1);
+                assert!(!expanded.is_active());
+                test_named_button(&settings, "interface-apply").emit_clicked();
+            }
+            4 => {
+                assert_eq!(
+                    Store::load().unwrap().interface,
+                    interface::Preferences::default()
+                );
+                assert_eq!(
+                    (ui.window.width(), ui.window.height()),
+                    base_size.get(),
+                    "Compact/default restores window dimensions"
+                );
+                let settings = test_settings_window();
+                test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "interface-size"
+                })
+                .unwrap()
+                .downcast::<gtk::DropDown>()
+                .unwrap()
+                .set_selected(0);
+                test_named_button(&settings, "interface-apply").emit_clicked();
+            }
+            5 => {
+                assert_eq!(Store::load().unwrap().interface.scale, 90);
+                assert!(
+                    ui.window.width() < base_size.get().0,
+                    "Small interface reduces window width"
+                );
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-compact-small.png");
+                let settings = test_settings_window();
+                capture_test_window(&settings, "/tmp/spotlight-window-small.png");
+                test_named_button(&settings, "interface-reset").emit_clicked();
+                test_named_button(&settings, "interface-apply").emit_clicked();
+                settings.close();
+                println!(
+                    "Interface UI passed: draft/apply, expanded and compact geometry, saved mode and scale, reset, small layout, hover rendering"
+                );
+                ui.window.application().unwrap().quit();
+                return glib::ControlFlow::Break;
+            }
+            _ => unreachable!(),
+        }
+        phase += 1;
+        glib::ControlFlow::Continue
+    });
+}
+
+fn assert_clean_scroll_edge(window: &gtk::Window, scroll: &gtk::ScrolledWindow, path: &str) {
+    // Check the formerly visible undershoot border in an empty part of the view.
+    let image = gtk::gdk_pixbuf::Pixbuf::from_file(path).unwrap();
+    let bytes = image.read_pixel_bytes();
+    let bounds = scroll.compute_bounds(window).unwrap();
+    let x = (image.width() - 90) as usize;
+    let top = bounds.y().round() as usize;
+    let stride = image.rowstride() as usize;
+    let channels = image.n_channels() as usize;
+    let sample = |y: usize| {
+        let offset = y * stride + x * channels;
+        &bytes[offset..offset + 3]
+    };
+    for offset in 32..44 {
+        assert_eq!(
+            sample(top + offset),
+            sample(top + 30),
+            "Unwanted horizontal border over scrolled content at {path}:{}",
+            top + offset
+        );
+    }
+}
+
+fn smoke_scroll(ui: Rc<Ui>) {
+    assert!(core::data_dir().starts_with("/tmp"));
+    ui.page(Page::Fonts);
+    let mut phase = 0;
+    glib::timeout_add_local(Duration::from_millis(450), move || {
+        let scroll = ui
+            .list
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .unwrap()
+            .downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        let adjustment = scroll.vadjustment();
+        let end = (adjustment.upper() - adjustment.page_size()).max(0.);
+        match phase {
+            0 => {
+                assert!(end > 0., "Font list must scroll");
+                if let Some(row) = ui.list.row_at_index(2) {
+                    ui.list.select_row(Some(&row));
+                    row.grab_focus();
+                    ui.search.grab_focus();
+                }
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-scroll-top.png");
+                adjustment.set_value(end / 2.);
+            }
+            1 => {
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-scroll-middle.png");
+                assert_clean_scroll_edge(
+                    ui.window.upcast_ref(),
+                    &scroll,
+                    "/tmp/spotlight-scroll-middle.png",
+                );
+                adjustment.set_value(end);
+            }
+            2 => {
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-scroll-bottom.png");
+                assert_clean_scroll_edge(
+                    ui.window.upcast_ref(),
+                    &scroll,
+                    "/tmp/spotlight-scroll-bottom.png",
+                );
+                adjustment.set_value(0.);
+            }
+            3 => {
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-scroll-return.png");
+                ui.settings();
+            }
+            4 => {
+                let settings = test_settings_window();
+                let tabs = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+                let scroll = tabs
+                    .visible_child()
+                    .unwrap()
+                    .downcast::<gtk::ScrolledWindow>()
+                    .unwrap();
+                let adjustment = scroll.vadjustment();
+                let end = adjustment.upper() - adjustment.page_size();
+                assert!(end > 0., "General settings must scroll");
+                adjustment.set_value(end / 2.);
+            }
+            5 => {
+                let settings = test_settings_window();
+                capture_test_window(&settings, "/tmp/spotlight-settings-scroll.png");
+                let tabs = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+                let scroll = tabs
+                    .visible_child()
+                    .unwrap()
+                    .downcast::<gtk::ScrolledWindow>()
+                    .unwrap();
+                assert_clean_scroll_edge(&settings, &scroll, "/tmp/spotlight-settings-scroll.png");
+                settings.close();
+                println!(
+                    "Scroll UI passed: no ghost border in search or Settings, scrolling down and back up"
+                );
+                ui.window.application().unwrap().quit();
+                return glib::ControlFlow::Break;
+            }
+            _ => unreachable!(),
+        }
+        phase += 1;
+        glib::ControlFlow::Continue
+    });
+}
+
 fn smoke_search_tools(ui: Rc<Ui>) {
     assert_eq!(
         std::env::var("SPOTLIGHT_SEARCH_FIXTURES").as_deref(),
@@ -5908,6 +6412,26 @@ fn smoke_search_tools(ui: Rc<Ui>) {
     shield.set_propagation_phase(gtk::PropagationPhase::Capture);
     shield.connect_key_pressed(|_, _, _, _| glib::Propagation::Stop);
     ui.window.add_controller(shield);
+    // Native pointer movement must not select fixture rows during scripted actions.
+    // The hover checks below emit controller signals explicitly.
+    let pointer = gtk::EventControllerLegacy::new();
+    pointer.set_propagation_phase(gtk::PropagationPhase::Capture);
+    pointer.connect_event(|_, event| {
+        if matches!(
+            event.event_type(),
+            gdk::EventType::MotionNotify
+                | gdk::EventType::EnterNotify
+                | gdk::EventType::LeaveNotify
+                | gdk::EventType::ButtonPress
+                | gdk::EventType::ButtonRelease
+                | gdk::EventType::Scroll
+        ) {
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    ui.window.add_controller(pointer);
     ui.load_recents();
     ui.search.set_text("uuid");
     let mut phase = 0;
@@ -6068,8 +6592,428 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                     !saved.contains("hash abc") && !saved.contains("contacts Danny"),
                     "Search content is not persisted in usage history"
                 );
+                let original_apps = ui.apps.borrow().clone();
+                let mut exact_app = original_apps.first().unwrap().clone();
+                exact_app.id = "fixture:exact-app".into();
+                exact_app.title = "Priority Fixture".into();
+                let mut partial_app = exact_app.clone();
+                partial_app.id = "fixture:partial-app".into();
+                partial_app.title = "Priority Fixture App".into();
+                *ui.apps.borrow_mut() = vec![partial_app, exact_app];
+                let file = core::home().join("Priority Fixture");
+                ui.recents.borrow_mut().insert(0, (file.clone(), 1));
+                ui.recents
+                    .borrow_mut()
+                    .insert(1, (core::home().join("Priority Fixture Folder"), 1));
+                ui.search.set_text("Priority Fixture");
+                {
+                    let results = ui.visible.borrow();
+                    assert_eq!(
+                        results[0].id, "fixture:exact-app",
+                        "Best matching app comes first"
+                    );
+                    assert_eq!(
+                        results[1].id, "fixture:partial-app",
+                        "Other matching apps precede files"
+                    );
+                    assert!(
+                        results
+                            .iter()
+                            .skip(2)
+                            .any(|i| i.id == file.to_string_lossy()),
+                        "Matching recent file remains available below apps"
+                    );
+                }
+            }
+            17 => {
+                let controllers = ui.list.observe_controllers();
+                let motion = (0..controllers.n_items())
+                    .find_map(|index| {
+                        controllers
+                            .item(index)?
+                            .downcast::<gtk::EventControllerMotion>()
+                            .ok()
+                    })
+                    .unwrap();
+                let hover = |index| {
+                    let row = ui.list.row_at_index(index).unwrap();
+                    let bounds = row.allocation();
+                    motion.emit_by_name::<()>(
+                        "motion",
+                        &[
+                            &20.0f64,
+                            &(f64::from(bounds.y()) + f64::from(bounds.height()) / 2.0),
+                        ],
+                    );
+                };
+                hover(1);
+                assert_eq!(
+                    ui.selected().unwrap().id,
+                    "fixture:partial-app",
+                    "Hover selects the app used by Enter and Open"
+                );
+                let folder = core::home()
+                    .join("Priority Fixture Folder")
+                    .to_string_lossy()
+                    .into_owned();
+                let index = ui
+                    .visible
+                    .borrow()
+                    .iter()
+                    .position(|item| item.id == folder)
+                    .unwrap();
+                hover(index as i32);
+                assert_eq!(
+                    ui.selected().unwrap().id,
+                    folder,
+                    "Hover selects folders too"
+                );
+                ui.refresh();
+                assert_eq!(
+                    ui.selected().unwrap().id,
+                    folder,
+                    "Background refresh preserves the hovered selection"
+                );
+            }
+            18 => {
+                let controllers = ui.list.observe_controllers();
+                let motion = (0..controllers.n_items())
+                    .find_map(|index| {
+                        controllers
+                            .item(index)?
+                            .downcast::<gtk::EventControllerMotion>()
+                            .ok()
+                    })
+                    .unwrap();
+                let folder = core::home()
+                    .join("Priority Fixture Folder")
+                    .to_string_lossy()
+                    .into_owned();
+                assert_eq!(
+                    ui.selected().unwrap().id,
+                    folder,
+                    "Selection survives asynchronous result updates"
+                );
+                ui.list.select_row(ui.list.row_at_index(0).as_ref());
+                motion.emit_by_name::<()>("enter", &[&20.0f64, &20.0f64]);
+                assert_eq!(
+                    ui.selected().unwrap().id,
+                    "fixture:exact-app",
+                    "A stationary pointer does not replace keyboard selection after rebuilding rows"
+                );
+                let index = ui
+                    .visible
+                    .borrow()
+                    .iter()
+                    .position(|item| item.id == folder)
+                    .unwrap();
+                let row = ui.list.row_at_index(index as i32).unwrap();
+                let bounds = row.allocation();
+                motion.emit_by_name::<()>(
+                    "motion",
+                    &[
+                        &20.0f64,
+                        &(f64::from(bounds.y()) + f64::from(bounds.height()) / 2.0),
+                    ],
+                );
+                assert_eq!(
+                    ui.selected().unwrap().id,
+                    folder,
+                    "Mouse movement resumes selection after keyboard navigation"
+                );
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-hover-preview.png");
+                ui.search.set_text("Priority Fixture App");
+                assert_eq!(
+                    ui.selected().unwrap().id,
+                    "fixture:partial-app",
+                    "New search selects its top result"
+                );
+                ui.settings();
+                let settings = gtk::Window::list_toplevels()
+                    .into_iter()
+                    .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
+                    .find(|window| window.title().as_deref() == Some("Spotlight Settings"))
+                    .unwrap();
+                let tabs = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+                assert_eq!(tabs.pages().n_items(), 5);
+                tabs.set_visible_child_name("theme");
+                let presets = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "theme-presets"
+                })
+                .unwrap()
+                .downcast::<gtk::DropDown>()
+                .unwrap();
+                presets.set_selected(1);
+                let apply =
+                    test_widget(settings.upcast_ref(), &|w| w.widget_name() == "theme-apply")
+                        .unwrap()
+                        .downcast::<gtk::Button>()
+                        .unwrap();
+                apply.emit_clicked();
+                assert_eq!(
+                    Store::load().unwrap().theme,
+                    theme::Theme::preset(1),
+                    "Theme preset persists"
+                );
+                let accent = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "theme-accent"
+                })
+                .unwrap()
+                .downcast::<gtk::Entry>()
+                .unwrap();
+                let picker = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "theme-accent-picker"
+                })
+                .unwrap()
+                .downcast::<gtk::ColorDialogButton>()
+                .unwrap();
+                picker.set_rgba(&gdk::RGBA::parse("#0088CC").unwrap());
+                assert_eq!(
+                    accent.text().as_str(),
+                    "#0088CC",
+                    "Native color picker updates the hex field"
+                );
+                accent.set_text("invalid");
+                apply.emit_clicked();
+                assert_eq!(
+                    Store::load().unwrap().theme,
+                    theme::Theme::preset(1),
+                    "Invalid colors do not overwrite the saved theme"
+                );
+                accent.set_text("#0088CC");
+                apply.emit_clicked();
+                assert_eq!(Store::load().unwrap().theme.accent, "#0088CC");
+                assert_eq!(presets.selected(), 3, "Editing a color selects Custom");
+            }
+            19 => {
+                let settings = gtk::Window::list_toplevels()
+                    .into_iter()
+                    .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
+                    .find(|window| window.title().as_deref() == Some("Spotlight Settings"))
+                    .unwrap();
+                capture_test_window(&settings, "/tmp/spotlight-theme-light-preview.png");
+                capture_test_window(
+                    ui.window.upcast_ref(),
+                    "/tmp/spotlight-theme-launcher-preview.png",
+                );
+                let reset =
+                    test_widget(settings.upcast_ref(), &|w| w.widget_name() == "theme-reset")
+                        .unwrap()
+                        .downcast::<gtk::Button>()
+                        .unwrap();
+                reset.emit_clicked();
+                let apply =
+                    test_widget(settings.upcast_ref(), &|w| w.widget_name() == "theme-apply")
+                        .unwrap()
+                        .downcast::<gtk::Button>()
+                        .unwrap();
+                apply.emit_clicked();
+                assert_eq!(
+                    Store::load().unwrap().theme,
+                    theme::Theme::default(),
+                    "Reset restores the default colors"
+                );
+                settings.close();
+                ui.settings();
+            }
+            20 => {
+                let settings = gtk::Window::list_toplevels()
+                    .into_iter()
+                    .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
+                    .find(|window| window.title().as_deref() == Some("Spotlight Settings"))
+                    .unwrap();
+                let tabs = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+                tabs.set_visible_child_name("theme");
+            }
+            21 => {
+                let settings = gtk::Window::list_toplevels()
+                    .into_iter()
+                    .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
+                    .find(|window| window.title().as_deref() == Some("Spotlight Settings"))
+                    .unwrap();
+                let background = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "theme-background"
+                })
+                .unwrap()
+                .downcast::<gtk::Entry>()
+                .unwrap();
+                assert_eq!(
+                    background.text().as_str(),
+                    theme::Theme::default().background,
+                    "Reopened Settings loads saved colors"
+                );
+                capture_test_window(&settings, "/tmp/spotlight-theme-dark-preview.png");
+                settings.close();
+                ui.search.set_text("walkthrough");
+                let help = ui
+                    .visible
+                    .borrow()
+                    .iter()
+                    .find(|item| item.id == "walkthrough")
+                    .unwrap()
+                    .clone();
+                ui.launch(help);
+            }
+            22 => {
+                let settings = test_settings_window();
+                let tabs = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+                assert_eq!(
+                    tabs.visible_child_name().as_deref(),
+                    Some("guide"),
+                    "Search opens the walkthrough tab"
+                );
+                let progress = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "guide-progress"
+                })
+                .unwrap()
+                .downcast::<gtk::Label>()
+                .unwrap();
+                assert!(progress.text().contains("1 of 6"));
+                let back = test_named_button(&settings, "guide-back");
+                assert!(!back.is_sensitive());
+                test_named_button(&settings, "guide-next").emit_clicked();
+                assert!(progress.text().contains("2 of 6"));
+                back.emit_clicked();
+                assert!(progress.text().contains("1 of 6"));
+            }
+            23 => {
+                let settings = test_settings_window();
+                capture_test_window(&settings, "/tmp/spotlight-guide-preview.png");
+                test_named_button(&settings, "guide-try").emit_clicked();
+                assert!(
+                    !ui.search.text().is_empty(),
+                    "App example fills the search without launching an app"
+                );
+                ui.settings_at(2);
+                let settings = test_settings_window();
+                let next = test_named_button(&settings, "guide-next");
+                next.emit_clicked();
+                next.emit_clicked();
+                assert!(
+                    !test_named_button(&settings, "guide-try").is_visible(),
+                    "Shortcut step has no example action"
+                );
+                next.emit_clicked();
+                test_named_button(&settings, "guide-try").emit_clicked();
+                assert_eq!(ui.search.text().as_str(), "2+3*4");
+                assert_eq!(ui.visible.borrow()[0].title, "14");
+                ui.settings_at(2);
+            }
+            24 => {
+                let settings = test_settings_window();
+                let progress = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "guide-progress"
+                })
+                .unwrap()
+                .downcast::<gtk::Label>()
+                .unwrap();
+                assert!(
+                    progress.text().contains("4 of 6"),
+                    "Guide resumes after trying an example"
+                );
+                let next = test_named_button(&settings, "guide-next");
+                next.emit_clicked();
+                next.emit_clicked();
+                assert_eq!(next.label().as_deref(), Some("Start searching"));
+                test_named_button(&settings, "guide-try").emit_clicked();
+                let tabs = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+                assert_eq!(
+                    tabs.visible_child_name().as_deref(),
+                    Some("theme"),
+                    "Last step opens Theme settings"
+                );
+                tabs.set_visible_child_name("guide");
+                next.emit_clicked();
+                assert_eq!(ui.search.text().as_str(), "");
+                assert!(*ui.page.borrow() == Page::Root);
+                assert_eq!(
+                    ui.guide_step.get(),
+                    0,
+                    "Completed guide restarts from the beginning"
+                );
+                ui.settings_at(3);
+            }
+            25 => {
+                let settings = test_settings_window();
+                let tabs = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+                assert_eq!(tabs.visible_child_name().as_deref(), Some("about"));
+                let version = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "about-version"
+                })
+                .unwrap()
+                .downcast::<gtk::Label>()
+                .unwrap();
+                assert_eq!(
+                    version.text().as_str(),
+                    concat!("Version ", env!("CARGO_PKG_VERSION"))
+                );
+                let logo = test_widget(settings.upcast_ref(), &|w| w.widget_name() == "about-logo")
+                    .unwrap();
+                assert!(logo.is_mapped(), "About logo is visible");
+                capture_test_window(&settings, "/tmp/spotlight-about-preview.png");
+            }
+            26 => {
+                let settings = test_settings_window();
+                capture_test_window(&settings, "/tmp/spotlight-about-animation-preview.png");
+                let tabs = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+                // Exercise the actual navigation buttons as well as programmatic guide links.
+                let navigation = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-navigation"
+                })
+                .unwrap();
+                let general = test_widget(&navigation, &|w| {
+                    w.clone().downcast::<gtk::ToggleButton>().is_ok_and(|b| {
+                        test_widget(b.upcast_ref(), &|child| {
+                            child
+                                .clone()
+                                .downcast::<gtk::Label>()
+                                .is_ok_and(|label| label.text() == "General")
+                        })
+                        .is_some()
+                    })
+                })
+                .unwrap()
+                .downcast::<gtk::ToggleButton>()
+                .unwrap();
+                general.set_active(true);
+                assert_eq!(tabs.visible_child_name().as_deref(), Some("general"));
+            }
+            27 => {
+                let settings = test_settings_window();
+                capture_test_window(&settings, "/tmp/spotlight-settings-general-preview.png");
+                settings.close();
                 println!(
-                    "Search UI passed: UUID regeneration, hash/Base64 vectors, inline cheat sheets, actual XDG recency and folders, async image thumbnails, real ripgrep content results, local PIM previews, invalid input, and private usage history"
+                    "Search UI passed: flat settings navigation, About logo and build version, walkthrough navigation, examples, resume and completion, Settings theme tab, saved presets and custom colors, validation and reset, app and folder hover selection, refresh preservation, keyboard/mouse selection, app priority over recent files, UUID regeneration, hash/Base64 vectors, inline cheat sheets, actual XDG recency and folders, async image thumbnails, real ripgrep content results, local PIM previews, invalid input, and private usage history"
                 );
                 ui.window.application().unwrap().quit();
                 return glib::ControlFlow::Break;
@@ -6080,6 +7024,21 @@ fn smoke_search_tools(ui: Rc<Ui>) {
         phase_at = std::time::Instant::now();
         glib::ControlFlow::Continue
     });
+}
+fn test_settings_window() -> gtk::Window {
+    gtk::Window::list_toplevels()
+        .into_iter()
+        .filter_map(|widget| widget.downcast::<gtk::Window>().ok())
+        .find(|window| {
+            window.title().as_deref() == Some("Spotlight Settings") && window.is_visible()
+        })
+        .unwrap()
+}
+fn test_named_button(window: &gtk::Window, name: &str) -> gtk::Button {
+    test_widget(window.upcast_ref(), &|widget| widget.widget_name() == name)
+        .unwrap()
+        .downcast::<gtk::Button>()
+        .unwrap()
 }
 fn smoke_boosters(ui: Rc<Ui>) {
     // Keep typing in the real desktop from changing the isolated fixture query.
@@ -7310,6 +8269,10 @@ fn main() -> glib::ExitCode {
                 smoke_superpowers(Rc::clone(&built));
             } else if std::env::args().any(|a| a == "--plus-smoke-test") {
                 smoke_plus(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--interface-smoke-test") {
+                smoke_interface(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--scroll-smoke-test") {
+                smoke_scroll(Rc::clone(&built));
             } else if std::env::args().any(|a| a == "--search-tools-smoke-test") {
                 smoke_search_tools(Rc::clone(&built));
             } else if std::env::args().any(|a| a == "--boosters-smoke-test") {

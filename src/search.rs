@@ -379,7 +379,7 @@ fn local_uri(uri: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 fn add_recent(entries: &mut HashMap<PathBuf, i64>, path: PathBuf, time: i64) {
-    if !path.exists() {
+    if core::hidden_path(&path) || !path.exists() {
         return;
     }
     if let Some(parent) = path.parent().filter(|p| p.is_dir()) {
@@ -598,6 +598,31 @@ mod tests {
         fs::write(&path, text).unwrap();
         assert!(read_xbel(&path).unwrap().is_empty());
         assert!(local_uri("file://remote-server/home/user/a").is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn recent_history_excludes_dotfiles_and_hidden_folders() {
+        let root =
+            std::env::temp_dir().join(format!("spotlight-hidden-recent-{}", std::process::id()));
+        fs::create_dir_all(root.join(".config/editor")).unwrap();
+        fs::create_dir_all(root.join("Documents")).unwrap();
+        let mut entries = HashMap::new();
+        for name in [".bashrc", "Documents/.env", ".config/editor/settings.json"] {
+            let path = root.join(name);
+            fs::write(&path, "fixture").unwrap();
+            add_recent(&mut entries, path, 1);
+        }
+        add_recent(&mut entries, root.join(".config/editor"), 1);
+        assert!(
+            entries.is_empty(),
+            "Hidden history must not add files or parent folders"
+        );
+        let visible = root.join("Documents/report.txt");
+        fs::write(&visible, "fixture").unwrap();
+        add_recent(&mut entries, visible.clone(), 2);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.get(&visible), Some(&2));
+        assert_eq!(entries.get(&root.join("Documents")), Some(&2));
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 pub fn home() -> PathBuf {
     std::env::var_os("HOME")
@@ -34,6 +38,8 @@ pub struct Store {
     pub obsidian_disabled: bool,
     pub quick_notes: Vec<crate::quicknote::SavedNote>,
     pub selected_font: Option<String>,
+    pub theme: crate::theme::Theme,
+    pub interface: crate::interface::Preferences,
     pub desktop_snippets: bool,
     pub emoji_skin_tone: Option<u8>,
     pub emoji_tones: HashMap<String, u8>,
@@ -323,6 +329,12 @@ pub fn calculate(text: &str) -> Option<String> {
         return None;
     }
     eval(&t).map(format)
+}
+
+pub fn hidden_path(path: &Path) -> bool {
+    path.components().any(
+        |part| matches!(part, Component::Normal(name) if name.as_encoded_bytes().starts_with(b".")),
+    )
 }
 
 pub fn index_files() -> Vec<PathBuf> {

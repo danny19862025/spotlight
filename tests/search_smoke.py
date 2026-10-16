@@ -27,6 +27,8 @@ with tempfile.TemporaryDirectory(prefix='spotlight-search-') as temp:
         directory.mkdir(parents=True, exist_ok=True)
     note = home / 'Notes/story.md'
     note.write_text('Notes about development\nRust async makes the launcher responsive.\n')
+    (home / 'Priority Fixture').write_text('App priority search fixture')
+    (home / 'Priority Fixture Folder').mkdir()
     (home / 'Notes/.hidden.md').write_text('Rust secret fixture')
     (home / 'Notes/target').mkdir()
     (home / 'Notes/target/output.txt').write_text('Rust build output')
@@ -35,7 +37,12 @@ with tempfile.TemporaryDirectory(prefix='spotlight-search-') as temp:
     (data / 'spotlight/contacts/danny.vcf').write_text('BEGIN:VCARD\nVERSION:3.0\nFN:Danny Example\nEMAIL:danny@example.test\nTEL:+61 123\nEND:VCARD\n')
     (data / 'spotlight/calendars/work.ics').write_text('BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:fixture\nSUMMARY:Rust meetup\nDTSTART;TZID=Australia/Sydney:20261020T180000\nRRULE:FREQ=WEEKLY\nLOCATION:Library\nEND:VEVENT\nEND:VCALENDAR\n')
     records = []
-    for path, date in ((image, '2026-10-16T00:00:00Z'), (note, '2026-10-15T00:00:00Z')):
+    hidden_config = home / '.config/editor/settings.json'
+    hidden_config.parent.mkdir(parents=True)
+    hidden_config.write_text('{}')
+    for path, date in ((home / 'Notes/.hidden.md', '2026-10-18T00:00:00Z'),
+                       (hidden_config, '2026-10-17T00:00:00Z'),
+                       (image, '2026-10-16T00:00:00Z'), (note, '2026-10-15T00:00:00Z')):
         records.append(f'<bookmark href="{escape(path.as_uri(), {chr(34): "&quot;"})}" added="{date}" modified="{date}" visited="{date}"><info><metadata owner="http://freedesktop.org"><mime:mime-type type="text/plain"/></metadata></info></bookmark>')
     (data / 'recently-used.xbel').write_text('<?xml version="1.0"?><xbel version="1.0" xmlns:mime="http://www.freedesktop.org/standards/shared-mime-info">' + ''.join(records) + '</xbel>')
     env = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(data), XDG_CONFIG_HOME=str(config),
