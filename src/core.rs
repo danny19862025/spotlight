@@ -17,6 +17,8 @@ pub fn data_dir() -> PathBuf {
 pub struct TextItem {
     pub name: String,
     pub value: String,
+    #[serde(default)]
+    pub trigger: String,
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -32,6 +34,9 @@ pub struct Store {
     pub obsidian_disabled: bool,
     pub quick_notes: Vec<crate::quicknote::SavedNote>,
     pub selected_font: Option<String>,
+    pub desktop_snippets: bool,
+    pub emoji_skin_tone: Option<u8>,
+    pub emoji_tones: HashMap<String, u8>,
 }
 impl Store {
     pub fn load() -> Result<Self, String> {

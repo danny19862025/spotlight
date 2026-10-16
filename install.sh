@@ -4,6 +4,10 @@ cd "$(dirname "$0")"
 cargo build --release --locked --offline
 mkdir -p "$HOME/.local/bin" "$HOME/.local/lib/spotlight" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
 install -m 755 target/release/spotlight "$HOME/.local/lib/spotlight/spotlight"
+if [ -f /usr/include/KPim6/AkonadiCore/Akonadi/ItemFetchJob ]; then
+    sh native/build-pim.sh
+    install -m 755 target/native/spotlight-pim "$HOME/.local/lib/spotlight/spotlight-pim"
+fi
 install -m 644 assets/UNICODE-LICENSE.txt "$HOME/.local/lib/spotlight/UNICODE-LICENSE.txt"
 install -m 644 assets/spotlight.svg "$HOME/.local/share/icons/hicolor/scalable/apps/spotlight.svg"
 cat > "$HOME/.local/bin/spotlight" <<'EOF'

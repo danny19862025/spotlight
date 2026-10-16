@@ -1,11 +1,23 @@
+mod boosters;
+mod caffeinate;
+mod clipimage;
 mod color;
 mod core;
 mod currency;
+mod desktop;
 mod emoji;
+mod extensions;
 mod fonts;
+mod measure;
+mod offline;
+mod pim;
 mod quicknote;
 mod reminder;
+mod search;
 mod shortcut;
+mod snippets;
+mod texttools;
+mod windowing;
 use core::{Store, TextItem};
 use gtk::{gdk, gio, glib, prelude::*};
 use std::{
@@ -65,6 +77,23 @@ impl Page {
 }
 #[derive(Clone)]
 enum Action {
+    Extension(extensions::Manifest),
+    RunExtension {
+        manifest: extensions::Manifest,
+        args: Vec<String>,
+        key: String,
+    },
+    ClipboardImage(PathBuf),
+    ClipboardTexture(gdk::Texture),
+    EmojiTones,
+    Preview {
+        title: String,
+        text: String,
+        open: Option<String>,
+    },
+    DesktopSnippets,
+    Query(String),
+    Booster(boosters::Operation),
     App(gio::AppInfo),
     Page(Page),
     Open(String),
@@ -81,6 +110,9 @@ enum Action {
     ResetFont,
     Noop,
     PickColor,
+    MeasureScreen,
+    Caffeinate,
+    Desktop(desktop::Command),
     AlarmSetup,
     TimerSetup,
     DismissAlarms,
@@ -91,6 +123,9 @@ enum Action {
 }
 #[derive(Clone)]
 struct Item {
+    image: Option<gdk::Texture>,
+    priority: i32,
+    thumbnail: Option<PathBuf>,
     id: String,
     title: String,
     subtitle: String,
@@ -102,6 +137,9 @@ struct Item {
 }
 fn item(id: &str, title: &str, subtitle: &str, icon: &str, badge: &str, action: Action) -> Item {
     Item {
+        image: None,
+        priority: 0,
+        thumbnail: None,
         id: id.into(),
         title: title.into(),
         subtitle: subtitle.into(),
@@ -119,8 +157,10 @@ struct Ui {
     section: gtk::Label,
     notice: gtk::Label,
     hint: gtk::Label,
+    awake_status: gtk::Label,
     add: gtk::Button,
     back: gtk::Button,
+    window_shortcuts: gtk::Button,
     store: RefCell<Store>,
     can_save: bool,
     page: RefCell<Page>,
@@ -132,17 +172,63 @@ struct Ui {
     file_loading: RefCell<bool>,
     files_ready: RefCell<bool>,
     clips: RefCell<Vec<String>>,
+    clip_images: RefCell<Vec<clipimage::Image>>,
+    clip_current: RefCell<Option<(gdk::Texture, Option<gdk::Texture>)>>,
+    clip_generation: Cell<u64>,
+    _window_bridge: Option<windowing::Bridge>,
+    extensions: RefCell<Vec<extensions::Manifest>>,
+    extension_errors: RefCell<Vec<String>>,
+    extensions_loading: Cell<bool>,
+    extension_session: RefCell<Option<ExtensionSession>>,
     result_limit: Cell<usize>,
     currency: RefCell<currency::State>,
+    booster_cache: RefCell<
+        std::collections::HashMap<
+            boosters::Query,
+            (std::time::Instant, Result<Vec<boosters::Entry>, String>),
+        >,
+    >,
+    booster_pending: RefCell<std::collections::HashSet<boosters::Query>>,
+    booster_busy: Cell<bool>,
+    desktop_snippets_running: Cell<bool>,
+    recents: RefCell<Vec<(PathBuf, i64)>>,
+    recents_loading: Cell<bool>,
+    thumbnails: RefCell<search::Thumbnails>,
+    thumbnail_targets: RefCell<std::collections::HashMap<PathBuf, Vec<glib::WeakRef<gtk::Image>>>>,
+    thumbnails_polling: Cell<bool>,
+    preview_window: RefCell<Option<gtk::Window>>,
     picker: RefCell<Option<(String, gio::SignalSubscription)>>,
     picking_color: Cell<bool>,
     picked_color: RefCell<Option<String>>,
+    measurement_request: RefCell<Option<(String, gio::SignalSubscription)>>,
+    measuring_screen: Cell<bool>,
+    measurement_window: RefCell<Option<measure::Ruler>>,
+    caffeinate: RefCell<Option<caffeinate::Inhibitor>>,
+    desktop_snapshot: RefCell<desktop::Snapshot>,
+    desktop_loading: Cell<bool>,
+    desktop_busy: Cell<bool>,
+    desktop_generation: Cell<u64>,
+    trash_dialog: RefCell<Option<gtk::Window>>,
     reminder_clock: RefCell<Option<glib::SourceId>>,
     note_editor: RefCell<Option<gtk::Window>>,
     note_draft: RefCell<String>,
     alarm_window: RefCell<Option<gtk::Window>>,
     alarm_repeat: RefCell<Option<glib::SourceId>>,
     alarm_label: RefCell<Option<gtk::Label>>,
+}
+struct ExtensionSession {
+    key: String,
+    manifest: extensions::Manifest,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    items: Vec<extensions::ResultItem>,
+    status: String,
+    done: bool,
+}
+impl Drop for ExtensionSession {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 impl Ui {
     fn error(&self, text: &str) {
@@ -156,6 +242,11 @@ impl Ui {
         }
         if let Err(e) = self.store.borrow().save() {
             self.error(&format!("Could not save: {e}"));
+        } else {
+            let store = self.store.borrow();
+            if let Err(e) = snippets::sync(&store.snippets, store.desktop_snippets) {
+                self.error(&format!("Could not sync snippet triggers: {e}"));
+            }
         }
     }
     fn selected(&self) -> Option<Item> {
@@ -171,12 +262,16 @@ impl Ui {
         self.back.set_visible(page != Page::Root);
         self.add
             .set_visible(matches!(page, Page::Snippets | Page::Links | Page::Notes));
+        self.window_shortcuts.set_visible(page == Page::Windows);
         self.search.grab_focus();
         if page == Page::Files {
             self.load_files();
         }
         if page == Page::Clipboard {
             self.load_clipboard();
+        }
+        if page == Page::Scripts {
+            self.load_extensions();
         }
         self.refresh();
     }
@@ -213,8 +308,13 @@ impl Ui {
     }
     fn file_items(&self, query: &str) -> Vec<Item> {
         let files = self.files.borrow();
-        let mut matches: Vec<_> = files
+        let recent = self.recents.borrow();
+        let mut seen = std::collections::HashSet::new();
+        let mut matches: Vec<_> = recent
             .iter()
+            .map(|(p, _)| p)
+            .chain(files.iter())
+            .filter(|p| seen.insert(p.to_path_buf()))
             .filter_map(|path| {
                 let name = path.file_name()?.to_string_lossy();
                 let score = if query.contains('/') {
@@ -222,7 +322,11 @@ impl Ui {
                 } else {
                     core::score(query, &name)
                 }?;
-                Some((score, path))
+                let rank = recent.iter().position(|(p, _)| p == path);
+                Some((
+                    score + rank.map(|i| 100 - i.min(90) as i32).unwrap_or(0),
+                    path,
+                ))
             })
             .collect();
         matches.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
@@ -232,7 +336,7 @@ impl Ui {
             .filter_map(|(_, path)| {
                 let name = path.file_name()?.to_string_lossy();
                 let full_path = path.to_string_lossy();
-                Some(item(
+                let mut result = item(
                     &full_path,
                     &name,
                     &full_path,
@@ -241,13 +345,106 @@ impl Ui {
                     } else {
                         "text-x-generic-symbolic"
                     },
-                    "File",
+                    if recent.iter().any(|(p, _)| p == path) {
+                        "Recent"
+                    } else {
+                        "File"
+                    },
                     Action::Open(gio::File::for_path(path).uri().to_string()),
-                ))
+                );
+                if search::image_path(path) {
+                    result.thumbnail = Some(path.clone());
+                }
+                result.priority = recent
+                    .iter()
+                    .position(|(p, _)| p == path)
+                    .map(|i| 90 - i.min(89) as i32)
+                    .unwrap_or(0);
+                Some(result)
             })
             .collect()
     }
+    fn load_recents(self: &Rc<Self>) {
+        if self.recents_loading.replace(true) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(search::recent());
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok(result) => {
+                    ui.recents_loading.set(false);
+                    if let Ok(recents) = result {
+                        *ui.recents.borrow_mut() = recents;
+                    }
+                    if ui.window.is_visible() {
+                        ui.refresh();
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(_) => {
+                    ui.recents_loading.set(false);
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+    fn thumbnail(self: &Rc<Self>, path: &std::path::Path, image: &gtk::Image) {
+        if let Some(bytes) = self.thumbnails.borrow_mut().request(path) {
+            if let Ok(texture) = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)) {
+                image.set_paintable(Some(&texture));
+            }
+        } else {
+            let mut targets = self.thumbnail_targets.borrow_mut();
+            targets.retain(|_, images| {
+                images.retain(|i| i.upgrade().is_some());
+                !images.is_empty()
+            });
+            targets
+                .entry(path.into())
+                .or_default()
+                .push(image.downgrade());
+        }
+        if self.thumbnails.borrow().pending() && !self.thumbnails_polling.replace(true) {
+            let weak = Rc::downgrade(self);
+            glib::timeout_add_local(Duration::from_millis(80), move || {
+                let Some(ui) = weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let changes = ui.thumbnails.borrow_mut().collect();
+                for (path, data) in changes {
+                    let images = ui
+                        .thumbnail_targets
+                        .borrow_mut()
+                        .remove(&path)
+                        .unwrap_or_default();
+                    if let Some(data) = data
+                        && let Ok(texture) =
+                            gdk::Texture::from_bytes(&glib::Bytes::from_owned(data))
+                    {
+                        for image in images.into_iter().filter_map(|i| i.upgrade()) {
+                            image.set_paintable(Some(&texture));
+                        }
+                    }
+                }
+                if ui.thumbnails.borrow().pending() {
+                    glib::ControlFlow::Continue
+                } else {
+                    ui.thumbnails_polling.set(false);
+                    glib::ControlFlow::Break
+                }
+            });
+        }
+    }
     fn load_clipboard(self: &Rc<Self>) {
+        self.capture_clipboard_image();
         self.clips.borrow_mut().clear();
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
@@ -285,7 +482,8 @@ impl Ui {
                 }
                 Ok(texts)
             })();
-            let _ = tx.send(result);
+            let images = clipimage::history();
+            let _ = tx.send((result, images));
         });
         let weak = Rc::downgrade(self);
         glib::timeout_add_local(Duration::from_millis(80), move || {
@@ -293,7 +491,11 @@ impl Ui {
                 return glib::ControlFlow::Break;
             };
             match rx.try_recv() {
-                Ok(result) => {
+                Ok((result, images)) => {
+                    match images {
+                        Ok(images) => *ui.clip_images.borrow_mut() = images,
+                        Err(error) => ui.error(&error),
+                    }
                     match result{Ok(texts)=>*ui.clips.borrow_mut()=texts,Err(_)=>ui.error("Clipboard history requires KDE Klipper. Enable it in your system tray.")};
                     ui.refresh();
                     glib::ControlFlow::Break
@@ -302,6 +504,170 @@ impl Ui {
                 Err(_) => glib::ControlFlow::Break,
             }
         });
+    }
+    fn capture_clipboard_image(self: &Rc<Self>) {
+        let generation = self.clip_generation.get().wrapping_add(1);
+        self.clip_generation.set(generation);
+        self.clip_current.borrow_mut().take();
+        let weak = Rc::downgrade(self);
+        self.window
+            .clipboard()
+            .read_texture_async(None::<&gio::Cancellable>, move |result| {
+                let Some(ui) = weak.upgrade() else { return };
+                if ui.clip_generation.get() != generation {
+                    return;
+                }
+                let Ok(Some(texture)) = result else { return };
+                if i64::from(texture.width()) * i64::from(texture.height()) > 16_000_000 {
+                    ui.error("Clipboard image exceeds 16 million pixels");
+                    return;
+                }
+                *ui.clip_current.borrow_mut() = Some((texture.clone(), None));
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(clipimage::thumbnail(&texture));
+                });
+                let weak = Rc::downgrade(&ui);
+                glib::timeout_add_local(Duration::from_millis(80), move || {
+                    let Some(ui) = weak.upgrade() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    if ui.clip_generation.get() != generation {
+                        return glib::ControlFlow::Break;
+                    }
+                    match rx.try_recv() {
+                        Ok(result) => {
+                            if let Ok(data) = result
+                                && let Ok(texture) =
+                                    gdk::Texture::from_bytes(&glib::Bytes::from_owned(data))
+                                && let Some(current) = ui.clip_current.borrow_mut().as_mut()
+                            {
+                                current.1 = Some(texture);
+                            }
+                            if *ui.page.borrow() == Page::Clipboard {
+                                ui.refresh();
+                            }
+                            glib::ControlFlow::Break
+                        }
+                        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                        Err(_) => glib::ControlFlow::Break,
+                    }
+                });
+            });
+    }
+    fn clipboard_items(&self) -> Vec<Item> {
+        let mut rows = Vec::new();
+        if let Some((texture, preview)) = self.clip_current.borrow().as_ref() {
+            let mut row = item(
+                "clip-image:current",
+                &format!(
+                    "Current clipboard image · {} × {}",
+                    texture.width(),
+                    texture.height()
+                ),
+                "Enter copies the image · Ctrl+K to preview",
+                "image-x-generic-symbolic",
+                "Image",
+                Action::ClipboardTexture(texture.clone()),
+            );
+            row.image = preview.clone();
+            row.priority = 200;
+            rows.push(row);
+        }
+        for (n, image) in self.clip_images.borrow().iter().enumerate() {
+            let mut row = item(
+                &format!("clip-image:{n}"),
+                &format!("Clipboard image · {} × {}", image.width, image.height),
+                "Klipper image history · Enter copies · Ctrl+K previews",
+                "image-x-generic-symbolic",
+                "Image",
+                Action::ClipboardImage(image.path.clone()),
+            );
+            row.image =
+                gdk::Texture::from_bytes(&glib::Bytes::from_owned(image.preview.clone())).ok();
+            row.priority = 100 - n as i32;
+            rows.push(row);
+        }
+        rows.extend(self.clips.borrow().iter().enumerate().map(|(i, s)| {
+            let mut row = item(
+                &format!("clip:{i}"),
+                &s.lines()
+                    .next()
+                    .unwrap_or("Text")
+                    .chars()
+                    .take(100)
+                    .collect::<String>(),
+                &format!("{} characters · Enter copies", s.chars().count()),
+                "edit-paste-symbolic",
+                "Text",
+                Action::Copy(s.clone()),
+            );
+            row.priority = -(i as i32);
+            row
+        }));
+        rows
+    }
+    fn clipboard_image(self: &Rc<Self>, path: PathBuf, preview: bool) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(clipimage::load(&path));
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_millis(60), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok(Ok(texture)) => {
+                    if preview {
+                        ui.image_preview(&texture);
+                    } else {
+                        ui.window.clipboard().set_texture(&texture);
+                        ui.error("Image copied · paste it into your target app");
+                    }
+                    glib::ControlFlow::Break
+                }
+                Ok(Err(error)) => {
+                    ui.error(&error);
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(_) => glib::ControlFlow::Break,
+            }
+        });
+    }
+    fn image_preview(self: &Rc<Self>, texture: &gdk::Texture) {
+        let dialog = gtk::Window::builder()
+            .application(&self.window.application().unwrap())
+            .title("Clipboard Image")
+            .transient_for(&self.window)
+            .modal(true)
+            .default_width(640)
+            .default_height(460)
+            .build();
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        panel.add_css_class("editor");
+        let picture = gtk::Picture::for_paintable(texture);
+        picture.set_can_shrink(true);
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.set_vexpand(true);
+        picture.set_hexpand(true);
+        panel.append(&picture);
+        let copy = gtk::Button::with_label("Copy Image");
+        let image = texture.clone();
+        let clipboard = self.window.clipboard();
+        copy.connect_clicked(move |_| clipboard.set_texture(&image));
+        panel.append(&copy);
+        let close = gtk::Button::with_label("Close");
+        let weak = dialog.downgrade();
+        close.connect_clicked(move |_| {
+            if let Some(dialog) = weak.upgrade() {
+                dialog.close();
+            }
+        });
+        panel.append(&close);
+        dialog.set_child(Some(&panel));
+        dialog.present();
     }
     fn color_items(&self) -> Vec<Item> {
         let picked = self.picked_color.borrow();
@@ -526,6 +892,7 @@ impl Ui {
         target.add_css_class("subtitle");
         panel.append(&target);
         let text = gtk::TextView::new();
+        self.snippet_text_keys(&text);
         text.set_wrap_mode(gtk::WrapMode::WordChar);
         text.buffer().set_text(&self.note_draft.borrow());
         let scroll = gtk::ScrolledWindow::builder()
@@ -1129,8 +1496,787 @@ impl Ui {
             );
         });
     }
+    fn finish_measurement(
+        self: &Rc<Self>,
+        result: Result<Option<gtk::gdk_pixbuf::Pixbuf>, String>,
+    ) {
+        self.measurement_request.borrow_mut().take();
+        match result {
+            Ok(Some(image)) => {
+                let ruler = measure::open(&self.window, image);
+                let weak = Rc::downgrade(self);
+                ruler.window.connect_close_request(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.measurement_window.borrow_mut().take();
+                        ui.measuring_screen.set(false);
+                        ui.window.present();
+                        ui.search.grab_focus();
+                    }
+                    glib::Propagation::Proceed
+                });
+                ruler.window.present();
+                *self.measurement_window.borrow_mut() = Some(ruler);
+                return;
+            }
+            Ok(None) => self.error("Screen measurement cancelled"),
+            Err(message) => self.error(&message),
+        }
+        self.measuring_screen.set(false);
+        self.window.present();
+        self.search.grab_focus();
+    }
+    fn measure_screen(self: &Rc<Self>) {
+        if self.measuring_screen.replace(true) {
+            if let Some(ruler) = self.measurement_window.borrow().as_ref() {
+                ruler.window.present();
+            }
+            return;
+        }
+        self.error("");
+        self.window.set_visible(false);
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let bus = match gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) {
+                Ok(bus) => bus,
+                Err(error) => {
+                    ui.finish_measurement(Err(format!(
+                        "Could not connect to screen capture: {error}"
+                    )));
+                    return;
+                }
+            };
+            let token = format!(
+                "spotlight_measure_{}",
+                glib::uuid_string_random().replace('-', "")
+            );
+            let sender = bus
+                .unique_name()
+                .unwrap()
+                .trim_start_matches(':')
+                .replace('.', "_");
+            let path = format!("/org/freedesktop/portal/desktop/request/{sender}/{token}");
+            let weak = Rc::downgrade(&ui);
+            let subscription = bus.subscribe_to_signal(
+                Some("org.freedesktop.portal.Desktop"),
+                Some("org.freedesktop.portal.Request"),
+                Some("Response"),
+                Some(&path),
+                None,
+                gio::DBusSignalFlags::NONE,
+                move |signal| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.finish_measurement(measure::response(signal.parameters));
+                    }
+                },
+            );
+            *ui.measurement_request.borrow_mut() = Some((path.clone(), subscription));
+            let options = std::collections::HashMap::from([
+                ("handle_token", token.to_variant()),
+                ("interactive", false.to_variant()),
+            ]);
+            let weak = Rc::downgrade(&ui);
+            bus.call(
+                Some("org.freedesktop.portal.Desktop"),
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Screenshot",
+                "Screenshot",
+                Some(&("", options).to_variant()),
+                None,
+                gio::DBusCallFlags::NONE,
+                10000,
+                None::<&gio::Cancellable>,
+                move |result| {
+                    let Some(ui) = weak.upgrade() else { return };
+                    if ui.measurement_request.borrow().is_none() {
+                        return;
+                    }
+                    match result {
+                        Ok(reply) if reply.child_value(0).str() == Some(path.as_str()) => {}
+                        Ok(_) => ui.finish_measurement(Err(
+                            "Unexpected response from screen capture".into(),
+                        )),
+                        Err(error) => ui.finish_measurement(Err(format!(
+                            "Could not capture the screen: {error}"
+                        ))),
+                    }
+                },
+            );
+        });
+    }
+    fn toggle_caffeinate(self: &Rc<Self>) {
+        let mut state = self.caffeinate.borrow_mut();
+        let result = if let Some(inhibitor) = state.as_mut() {
+            inhibitor.stop().map(|()| {
+                state.take();
+                "Caffeinate is off · normal power saving restored"
+            })
+        } else {
+            caffeinate::Inhibitor::start().map(|inhibitor| {
+                *state = Some(inhibitor);
+                "Caffeinate is on · screen and computer stay awake until turned off or Spotlight quits"
+            })
+        };
+        drop(state);
+        self.awake_status
+            .set_visible(self.caffeinate.borrow().is_some());
+        self.refresh();
+        self.error(match &result {
+            Ok(message) => message,
+            Err(message) => message,
+        });
+    }
+    fn refresh_desktop_rows(self: &Rc<Self>) {
+        let selected = self.selected().map(|item| item.id);
+        self.refresh();
+        if let Some(id) = selected {
+            if let Some(index) = self.visible.borrow().iter().position(|item| item.id == id) {
+                self.list
+                    .select_row(self.list.row_at_index(index as i32).as_ref());
+            }
+        }
+    }
+    fn load_desktop(self: &Rc<Self>) {
+        self.load_extensions();
+        self.load_recents();
+        if self.desktop_busy.get() || self.desktop_loading.replace(true) {
+            return;
+        }
+        let generation = self.desktop_generation.get().wrapping_add(1);
+        self.desktop_generation.set(generation);
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(desktop::Snapshot::read());
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if ui.desktop_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            match rx.try_recv() {
+                Ok(snapshot) => {
+                    ui.desktop_loading.set(false);
+                    *ui.desktop_snapshot.borrow_mut() = snapshot;
+                    ui.refresh_desktop_rows();
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(_) => {
+                    ui.desktop_loading.set(false);
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+    fn desktop_command(self: &Rc<Self>, command: desktop::Command) {
+        if self.desktop_busy.get() {
+            self.error("A system command is still running");
+            return;
+        }
+        if command == desktop::Command::EmptyTrash {
+            self.confirm_empty_trash();
+        } else {
+            self.execute_desktop(command);
+        }
+    }
+    fn execute_desktop(self: &Rc<Self>, command: desktop::Command) {
+        if self.desktop_busy.replace(true) {
+            return;
+        }
+        self.desktop_generation
+            .set(self.desktop_generation.get().wrapping_add(1));
+        self.desktop_loading.set(false);
+        self.error(&format!("{}…", command.title()));
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = desktop::execute(command);
+            let _ = tx.send((result, desktop::Snapshot::read()));
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok((result, snapshot)) => {
+                    ui.desktop_busy.set(false);
+                    *ui.desktop_snapshot.borrow_mut() = snapshot;
+                    ui.refresh_desktop_rows();
+                    ui.error(match &result {
+                        Ok(message) => message,
+                        Err(message) => message,
+                    });
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(_) => {
+                    ui.desktop_busy.set(false);
+                    ui.error("The system command did not complete");
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+    fn confirm_empty_trash(self: &Rc<Self>) {
+        if let Some(dialog) = self.trash_dialog.borrow().as_ref() {
+            dialog.present();
+            return;
+        }
+        let dialog = gtk::Window::builder()
+            .application(&self.window.application().unwrap())
+            .transient_for(&self.window)
+            .modal(true)
+            .destroy_with_parent(true)
+            .title("Empty Trash?")
+            .default_width(410)
+            .resizable(false)
+            .build();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        content.add_css_class("editor");
+        let title = gtk::Label::new(Some("Permanently empty the Trash?"));
+        title.add_css_class("item-title");
+        content.append(&title);
+        let message = gtk::Label::new(Some(
+            "All files in the Trash will be permanently deleted. This cannot be undone.",
+        ));
+        message.set_wrap(true);
+        message.set_max_width_chars(48);
+        content.append(&message);
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        buttons.set_halign(gtk::Align::End);
+        let cancel = gtk::Button::with_label("Cancel");
+        let empty = gtk::Button::with_label("Empty Trash");
+        empty.add_css_class("accent");
+        buttons.append(&cancel);
+        buttons.append(&empty);
+        content.append(&buttons);
+        dialog.set_child(Some(&content));
+        dialog.set_default_widget(Some(&cancel));
+        let weak_dialog = dialog.downgrade();
+        cancel.connect_clicked(move |_| {
+            if let Some(dialog) = weak_dialog.upgrade() {
+                dialog.close();
+            }
+        });
+        let weak_dialog = dialog.downgrade();
+        let weak = Rc::downgrade(self);
+        empty.connect_clicked(move |_| {
+            if let Some(dialog) = weak_dialog.upgrade() {
+                dialog.close();
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.execute_desktop(desktop::Command::EmptyTrash);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        dialog.connect_close_request(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.trash_dialog.borrow_mut().take();
+                ui.search.grab_focus();
+            }
+            glib::Propagation::Proceed
+        });
+        let keys = gtk::EventControllerKey::new();
+        let weak_dialog = dialog.downgrade();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                if let Some(dialog) = weak_dialog.upgrade() {
+                    dialog.close();
+                }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        dialog.add_controller(keys);
+        *self.trash_dialog.borrow_mut() = Some(dialog.clone());
+        dialog.present();
+        cancel.grab_focus();
+    }
+    fn load_extensions(self: &Rc<Self>) {
+        if self.extensions_loading.replace(true) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(extensions::discover());
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok((manifests, errors)) => {
+                    *ui.extensions.borrow_mut() = manifests;
+                    *ui.extension_errors.borrow_mut() = errors;
+                    ui.extensions_loading.set(false);
+                    ui.refresh();
+                    glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(_) => {
+                    ui.extensions_loading.set(false);
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+    fn extension_icon(manifest: &extensions::Manifest, icon: &str, row: &mut Item) {
+        if let Some(path) = manifest.icon_path(icon) {
+            row.gicon = Some(gio::FileIcon::new(&gio::File::for_path(path)).upcast());
+        } else if !icon.is_empty()
+            && icon.len() <= 128
+            && icon
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+        {
+            row.gicon = Some(gio::ThemedIcon::new(icon).upcast());
+        } else if icon.chars().count() <= 8 {
+            row.icon = icon.into();
+        }
+    }
+    fn extension_menu(&self) -> Vec<Item> {
+        let mut rows = self
+            .extensions
+            .borrow()
+            .iter()
+            .map(|m| {
+                let mut row = item(
+                    &format!("extension:{}", m.id),
+                    &m.name,
+                    &format!("{} · ext {}", m.description, m.id),
+                    "utilities-terminal-symbolic",
+                    "Extension",
+                    Action::Extension(m.clone()),
+                );
+                Self::extension_icon(m, &m.icon, &mut row);
+                row
+            })
+            .collect::<Vec<_>>();
+        if *self.page.borrow() == Page::Scripts {
+            rows.extend(self.extension_errors.borrow().iter().map(|e| {
+                item(
+                    "extension-error",
+                    "Invalid extension manifest",
+                    e,
+                    "dialog-warning-symbolic",
+                    "Error",
+                    Action::Noop,
+                )
+            }));
+        }
+        rows
+    }
+    fn open_extension(self: &Rc<Self>, manifest: extensions::Manifest) {
+        if manifest.mode == extensions::Mode::Search {
+            self.page(Page::Root);
+            self.search.set_text(&format!("ext {} ", manifest.id));
+            self.search.set_position(-1);
+            return;
+        }
+        if manifest.args.is_empty() {
+            self.page(Page::Root);
+            let key = format!("ext {}", manifest.id);
+            self.search.set_text(&key);
+            self.start_extension(manifest, Vec::new(), key, false);
+            self.refresh();
+            return;
+        }
+        let dialog = gtk::Window::builder()
+            .application(&self.window.application().unwrap())
+            .title(&manifest.name)
+            .transient_for(&self.window)
+            .modal(true)
+            .default_width(480)
+            .build();
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        panel.add_css_class("editor");
+        let description = gtk::Label::new(Some(&manifest.description));
+        description.set_wrap(true);
+        panel.append(&description);
+        let mut entries = Vec::new();
+        for arg in &manifest.args {
+            let label = gtk::Label::new(Some(&format!(
+                "{}{}",
+                arg.name,
+                if arg.required { " *" } else { "" }
+            )));
+            label.set_xalign(0.);
+            panel.append(&label);
+            let input = gtk::Entry::builder()
+                .placeholder_text(&arg.placeholder)
+                .text(&arg.default)
+                .build();
+            panel.append(&input);
+            entries.push(input);
+        }
+        let status = gtk::Label::new(None);
+        status.set_wrap(true);
+        panel.append(&status);
+        let run = gtk::Button::with_label("Run Extension");
+        run.add_css_class("accent");
+        panel.append(&run);
+        let close = gtk::Button::with_label("Cancel");
+        let weak_dialog = dialog.downgrade();
+        close.connect_clicked(move |_| {
+            if let Some(d) = weak_dialog.upgrade() {
+                d.close();
+            }
+        });
+        panel.append(&close);
+        dialog.set_child(Some(&panel));
+        let weak = Rc::downgrade(self);
+        let weak_dialog = dialog.downgrade();
+        run.connect_clicked(move |_| {
+            let args = entries
+                .iter()
+                .map(|e| e.text().to_string())
+                .collect::<Vec<_>>();
+            if let Err(error) = manifest.validate_args(&args) {
+                status.set_text(&error);
+                return;
+            }
+            if let Some(ui) = weak.upgrade() {
+                let key = format!(
+                    "ext {} {}",
+                    manifest.id,
+                    args.iter()
+                        .map(|a| serde_json::to_string(a).unwrap())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                if let Some(d) = weak_dialog.upgrade() {
+                    d.close();
+                }
+                ui.page(Page::Root);
+                ui.search.set_text(&key);
+                ui.start_extension(manifest.clone(), args, key, false);
+                ui.refresh();
+            }
+        });
+        dialog.present();
+    }
+    fn start_extension(
+        self: &Rc<Self>,
+        manifest: extensions::Manifest,
+        args: Vec<String>,
+        key: String,
+        debounce: bool,
+    ) {
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *self.extension_session.borrow_mut() = Some(ExtensionSession {
+            key: key.clone(),
+            manifest: manifest.clone(),
+            cancel: cancel.clone(),
+            items: Vec::new(),
+            status: "Running extension…".into(),
+            done: false,
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(
+            Duration::from_millis(if debounce { 350 } else { 0 }),
+            move || {
+                let Some(ui) = weak.upgrade() else { return };
+                if cancel.load(std::sync::atomic::Ordering::Relaxed)
+                    || ui.search.text().trim() != key
+                    || !ui.window.is_visible()
+                {
+                    return;
+                }
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || extensions::run(manifest, args, cancel, tx));
+                let weak = Rc::downgrade(&ui);
+                glib::timeout_add_local(Duration::from_millis(60), move || {
+                    let Some(ui) = weak.upgrade() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    let selected = ui
+                        .selected()
+                        .filter(|i| i.id.starts_with("extension-result:"))
+                        .map(|i| i.id);
+                    let (done, changed) = {
+                        let mut changed = false;
+                        let mut guard = ui.extension_session.borrow_mut();
+                        let Some(session) = guard.as_mut().filter(|s| s.key == key) else {
+                            return glib::ControlFlow::Break;
+                        };
+                        loop {
+                            match rx.try_recv() {
+                                Ok(event) => {
+                                    changed = true;
+                                    match event {
+                                        extensions::Event::Item(item) => {
+                                            if let Some(old) =
+                                                session.items.iter_mut().find(|i| i.id == item.id)
+                                            {
+                                                *old = item;
+                                            } else if session.items.len() < 50 {
+                                                session.items.push(item);
+                                            }
+                                        }
+                                        extensions::Event::Replace(items) => session.items = items,
+                                        extensions::Event::Status(text) => session.status = text,
+                                        extensions::Event::Done(result) => {
+                                            session.done = true;
+                                            session.status = result.err().unwrap_or_default();
+                                        }
+                                    }
+                                }
+                                Err(mpsc::TryRecvError::Empty) => break,
+                                Err(mpsc::TryRecvError::Disconnected) => {
+                                    if !session.done {
+                                        session.done = true;
+                                        session.status =
+                                            "Extension stopped without a final result".into();
+                                        changed = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        (session.done, changed)
+                    };
+                    if changed {
+                        ui.refresh();
+                        if let Some(id) = selected
+                            && let Some(index) = ui.visible.borrow().iter().position(|i| i.id == id)
+                        {
+                            ui.list
+                                .select_row(ui.list.row_at_index(index as i32).as_ref());
+                        }
+                    }
+                    if done {
+                        glib::ControlFlow::Break
+                    } else {
+                        glib::ControlFlow::Continue
+                    }
+                });
+            },
+        );
+    }
+    fn extension_items(self: &Rc<Self>, key: &str, id: &str, text: &str) -> Vec<Item> {
+        let manifest = self
+            .extensions
+            .borrow()
+            .iter()
+            .find(|m| m.id == id)
+            .cloned();
+        let Some(manifest) = manifest else {
+            return vec![item(
+                "extension-help",
+                if self.extensions_loading.get() {
+                    "Loading extensions…"
+                } else {
+                    "Choose an installed extension"
+                },
+                "Type ext <id> <arguments> · browse Script Commands for manifests and legacy scripts",
+                "utilities-terminal-symbolic",
+                "Info",
+                Action::Page(Page::Scripts),
+            )];
+        };
+        let args = match manifest.arguments(text) {
+            Ok(args) => args,
+            Err(error) => {
+                return vec![item(
+                    "extension-args",
+                    &manifest.name,
+                    &error,
+                    "utilities-terminal-symbolic",
+                    "Args",
+                    Action::Extension(manifest.clone()),
+                )];
+            }
+        };
+        let matching = self
+            .extension_session
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| s.key == key);
+        if !matching {
+            if manifest.mode == extensions::Mode::Search {
+                self.start_extension(manifest.clone(), args, key.into(), true);
+            } else {
+                return vec![item(
+                    "extension-run",
+                    &format!("Run {}", manifest.name),
+                    "Enter runs this extension with the supplied arguments",
+                    "utilities-terminal-symbolic",
+                    "Run",
+                    Action::RunExtension {
+                        manifest,
+                        args,
+                        key: key.into(),
+                    },
+                )];
+            }
+        }
+        let session = self.extension_session.borrow();
+        let Some(session) = session.as_ref() else {
+            return Vec::new();
+        };
+        let mut rows = session
+            .items
+            .iter()
+            .map(|entry| {
+                let action = match &entry.action {
+                    Some(extensions::Action::Copy { text }) => Action::Copy(text.clone()),
+                    Some(extensions::Action::Open { url }) => Action::Open(url.clone()),
+                    Some(extensions::Action::Run { args }) => Action::RunExtension {
+                        manifest: manifest.clone(),
+                        args: args.clone(),
+                        key: key.into(),
+                    },
+                    None => Action::Noop,
+                };
+                let mut row = item(
+                    &format!("extension-result:{}:{}", manifest.id, entry.id),
+                    &entry.title,
+                    &entry.subtitle,
+                    "utilities-terminal-symbolic",
+                    "Extension",
+                    action,
+                );
+                Self::extension_icon(
+                    &session.manifest,
+                    entry.icon.as_deref().unwrap_or(&manifest.icon),
+                    &mut row,
+                );
+                row
+            })
+            .collect::<Vec<_>>();
+        if !session.status.is_empty() {
+            rows.push(item(
+                "extension-status",
+                &session.status,
+                "Extension status",
+                "utilities-terminal-symbolic",
+                if session.done { "Done" } else { "Running" },
+                Action::Noop,
+            ));
+        } else if rows.is_empty() {
+            rows.push(item(
+                "extension-empty",
+                "No extension results",
+                "Try another query or Ctrl+R",
+                "utilities-terminal-symbolic",
+                "Info",
+                Action::Noop,
+            ));
+        }
+        rows
+    }
+    fn emoji_items(&self) -> Vec<Item> {
+        let store = self.store.borrow();
+        let mut rows = emoji_items();
+        let mut seen = std::collections::HashSet::new();
+        for row in &mut rows {
+            if let Action::Copy(symbol) = &mut row.action {
+                let chosen = store
+                    .emoji_tones
+                    .get(&emoji::base(symbol))
+                    .copied()
+                    .or(store.emoji_skin_tone);
+                let preferred = emoji::variant(symbol, chosen);
+                row.icon = preferred.clone();
+                row.keywords.push_str(&format!(" {preferred}"));
+                if preferred != *symbol {
+                    row.subtitle = format!(
+                        "{} · preferred skin tone · Enter copies",
+                        row.subtitle
+                            .split(" · Enter")
+                            .next()
+                            .unwrap_or(&row.subtitle)
+                    );
+                }
+                *symbol = preferred;
+            }
+        }
+        rows.retain(|row| match &row.action {
+            Action::Copy(symbol) => seen.insert(symbol.clone()),
+            _ => true,
+        });
+        for (symbol, name) in emoji::kaomoji() {
+            let mut row = item(
+                &format!("kaomoji:{name}"),
+                name,
+                &format!("{symbol} · Enter copies"),
+                "face-smile-symbolic",
+                "Kaomoji",
+                Action::Copy((*symbol).into()),
+            );
+            row.keywords = format!("kaomoji emoticon text face {name} {symbol}");
+            rows.push(row);
+        }
+        rows
+    }
+    fn emoji_tones(self: &Rc<Self>) {
+        let dialog = gtk::Window::builder()
+            .title("Emoji Skin Tone")
+            .transient_for(&self.window)
+            .modal(true)
+            .default_width(420)
+            .build();
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        panel.add_css_class("editor");
+        let help = gtk::Label::new(Some(
+            "Choose your default skin tone. Selecting a specific emoji variant also remembers its tone for future picks.",
+        ));
+        help.set_wrap(true);
+        panel.append(&help);
+        for (tone, label) in [
+            (None, "👍 Default"),
+            (Some(1), "👍🏻 Light"),
+            (Some(2), "👍🏼 Medium-light"),
+            (Some(3), "👍🏽 Medium"),
+            (Some(4), "👍🏾 Medium-dark"),
+            (Some(5), "👍🏿 Dark"),
+        ] {
+            let button = gtk::Button::with_label(label);
+            let weak = Rc::downgrade(self);
+            let d = dialog.downgrade();
+            button.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    if ui.can_save {
+                        let mut store = ui.store.borrow_mut();
+                        store.emoji_skin_tone = tone;
+                        store.emoji_tones.clear();
+                        drop(store);
+                        ui.save();
+                        ui.refresh();
+                    }
+                }
+                if let Some(d) = d.upgrade() {
+                    d.close();
+                }
+            });
+            panel.append(&button);
+        }
+        dialog.set_child(Some(&panel));
+        dialog.present();
+    }
     fn root(&self) -> Vec<Item> {
         let mut out = self.apps.borrow().clone();
+        out.extend(self.extension_menu());
+        out.push(item(
+            "emoji-tones",
+            "Emoji Skin Tone",
+            "Choose a default tone · individual choices are remembered",
+            "preferences-desktop-accessibility-symbolic",
+            "Emoji",
+            Action::EmojiTones,
+        ));
+        if self.search.text().trim().is_empty() {
+            out.extend(
+                self.file_items("")
+                    .into_iter()
+                    .filter(|i| i.badge == "Recent")
+                    .take(10),
+            );
+        }
         if self.store.borrow().selected_font.is_some() {
             out.push(item(
                 "reset-font",
@@ -1160,6 +2306,25 @@ impl Ui {
             Action::QuickNote(String::new()),
         ));
         let store = self.store.borrow();
+        for (index, snippet) in store.snippets.iter().enumerate() {
+            let mut result = item(
+                &format!("snippet:{index}"),
+                &snippet.name,
+                &format!(
+                    "Snippet · {} · Enter to copy",
+                    if snippet.trigger.is_empty() {
+                        "add a trigger in Snippets"
+                    } else {
+                        &snippet.trigger
+                    }
+                ),
+                "document-edit-symbolic",
+                "Snippet",
+                Action::Copy(snippet.value.clone()),
+            );
+            result.keywords = snippet.trigger.clone();
+            out.push(result);
+        }
         if let Some(vault) = &store.obsidian_vault {
             out.push(item(
                 "obsidian-vault",
@@ -1231,6 +2396,176 @@ impl Ui {
         );
         picker.keywords = "color colour picker pick eyedropper pipette screen pixel".into();
         out.push(picker);
+        let mut ruler = item(
+            "measure-screen",
+            "Screen Measurement",
+            "Drag to measure width, height, and distance in pixels · copy the result",
+            "accessories-calculator-symbolic",
+            "Command",
+            Action::MeasureScreen,
+        );
+        ruler.keywords =
+            "measure measurement ruler screen distance dimensions width height pixels mesurment"
+                .into();
+        out.push(ruler);
+        let awake = self.caffeinate.borrow().is_some();
+        let mut caffeine = item(
+            "caffeinate",
+            if awake {
+                "Turn Off Caffeinate"
+            } else {
+                "Caffeinate · Keep Awake"
+            },
+            if awake {
+                "Active · Enter to restore normal screen and sleep settings"
+            } else {
+                "Keep the screen and computer awake while Spotlight runs · Enter to turn on"
+            },
+            "weather-clear-symbolic",
+            if awake { "On" } else { "Off" },
+            Action::Caffeinate,
+        );
+        caffeine.keywords =
+            "caffeinate caffinate caffeine keep awake screen sleep suspend prevent disable".into();
+        out.push(caffeine);
+        out.push(window_shortcuts_item());
+        out.push(item(
+            "desktop-snippets",
+            if self.store.borrow().desktop_snippets {
+                "Disable Desktop Snippet Expansion"
+            } else {
+                "Enable Desktop Snippet Expansion"
+            },
+            "Expand trigger words across apps with Espanso · configure triggers in Snippets",
+            "document-edit-symbolic",
+            "Snippets",
+            Action::DesktopSnippets,
+        ));
+        for (id, title, detail, query) in [
+            (
+                "offline-translate",
+                "Offline Translator / Dictionary",
+                "Local dictd and dictionary files · translate en es hello",
+                "translate ",
+            ),
+            (
+                "switch-windows",
+                "Window Switcher",
+                "List open KWin windows · window chrome",
+                "window ",
+            ),
+            (
+                "tldr",
+                "Cheat Sheet · tldr",
+                "Read command examples inside Spotlight · tldr tar",
+                "tldr ",
+            ),
+            (
+                "uuid",
+                "Generate UUID",
+                "Random UUID v4 · Enter copies",
+                "uuid",
+            ),
+            (
+                "hash",
+                "Hash Generator",
+                "hash mytext · SHA-256, SHA-512, SHA-1, MD5",
+                "hash ",
+            ),
+            (
+                "base64",
+                "Base64 Encode / Decode",
+                "base64 encode mytext or base64 decode <text>",
+                "base64 encode ",
+            ),
+            (
+                "recents",
+                "Recent Files & Folders",
+                "Actual XDG and KDE recent documents · newest first",
+                "recent ",
+            ),
+            (
+                "content-search",
+                "Search File Contents",
+                "Use ripgrep · in: notes rust or in: ~/Projects phrase",
+                "in: notes ",
+            ),
+            (
+                "contacts",
+                "Search Contacts",
+                "Akonadi / KAddressBook and local vCard resources",
+                "contacts ",
+            ),
+            (
+                "calendar",
+                "Search Calendar",
+                "Akonadi events and local iCalendar resources",
+                "calendar ",
+            ),
+            (
+                "dictionary",
+                "Dictionary · Define Word",
+                "Type define <word> · English definitions and examples",
+                "define ",
+            ),
+            (
+                "process-killer",
+                "Process Killer",
+                "Type kill firefox · choose a PID to terminate",
+                "kill ",
+            ),
+            (
+                "git-repos",
+                "Git Repositories",
+                "Fuzzy-search local repositories · open folder or GitHub",
+                "git ",
+            ),
+            (
+                "git-clone",
+                "Git Clone",
+                "Clone a repository into ~/Projects",
+                "git clone ",
+            ),
+            (
+                "github-view",
+                "GitHub · View Repository",
+                "Type gh repo view owner/repo or a local repository name",
+                "gh repo view ",
+            ),
+            (
+                "docker-containers",
+                "Docker Containers",
+                "List containers · start or stop from Spotlight",
+                "docker ",
+            ),
+            (
+                "podman-containers",
+                "Podman Containers",
+                "List containers · start or stop from Spotlight",
+                "podman ",
+            ),
+        ] {
+            out.push(item(
+                id,
+                title,
+                detail,
+                "utilities-terminal-symbolic",
+                "Command",
+                Action::Query(query.into()),
+            ));
+        }
+        for command in desktop::Command::ALL {
+            let mut entry = item(
+                command.id(),
+                command.title(),
+                &self.desktop_snapshot.borrow().description(command),
+                command.icon(),
+                "System",
+                Action::Desktop(command),
+            );
+            entry.keywords = command.keywords().into();
+            out.push(entry);
+        }
         out.push(item(
             "color-formats",
             "Color Formats",
@@ -1470,12 +2805,308 @@ impl Ui {
             Action::Noop,
         )
     }
+    fn booster_items(self: &Rc<Self>, query: boosters::Query) -> Vec<Item> {
+        let cached = self
+            .booster_cache
+            .borrow()
+            .get(&query)
+            .filter(|(time, result)| {
+                time.elapsed()
+                    < if result.is_err() {
+                        Duration::from_secs(30)
+                    } else {
+                        query.ttl()
+                    }
+            })
+            .map(|(_, result)| result.clone());
+        let entries = if let Some(result) = cached {
+            result.unwrap_or_else(|error| {
+                vec![boosters::hint(
+                    error,
+                    "Check the command or required tool · Ctrl+R retries",
+                )]
+            })
+        } else {
+            if self.booster_pending.borrow_mut().insert(query.clone()) {
+                let weak = Rc::downgrade(self);
+                let request = query.clone();
+                glib::timeout_add_local_once(Duration::from_millis(350), move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    if *ui.page.borrow() != Page::Root
+                        || boosters::Query::parse(&ui.search.text()).as_ref() != Some(&request)
+                    {
+                        ui.booster_pending.borrow_mut().remove(&request);
+                        return;
+                    }
+                    let (tx, rx) = mpsc::channel();
+                    let work = request.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(boosters::fetch(&work));
+                    });
+                    let weak = Rc::downgrade(&ui);
+                    glib::timeout_add_local(Duration::from_millis(60), move || {
+                        let Some(ui) = weak.upgrade() else {
+                            return glib::ControlFlow::Break;
+                        };
+                        let result = match rx.try_recv() {
+                            Ok(result) => result,
+                            Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                            Err(_) => Err("Command lookup interrupted".into()),
+                        };
+                        ui.booster_pending.borrow_mut().remove(&request);
+                        let mut cache = ui.booster_cache.borrow_mut();
+                        if cache.len() >= 48 {
+                            cache.clear();
+                        }
+                        cache.insert(request.clone(), (std::time::Instant::now(), result));
+                        drop(cache);
+                        if *ui.page.borrow() == Page::Root
+                            && boosters::Query::parse(&ui.search.text()).as_ref() == Some(&request)
+                        {
+                            ui.refresh();
+                        }
+                        glib::ControlFlow::Break
+                    });
+                });
+            }
+            vec![boosters::hint("Loading…", "Searching in the background")]
+        };
+        entries
+            .into_iter()
+            .enumerate()
+            .map(|(n, e)| {
+                let thumbnail = match &e.operation {
+                    Some(boosters::Operation::OpenPath(path)) if search::image_path(path) => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                };
+                let action = match e.operation {
+                    Some(boosters::Operation::Query(query)) => Action::Query(query),
+                    Some(boosters::Operation::Preview { title, text, open }) => {
+                        Action::Preview { title, text, open }
+                    }
+                    Some(boosters::Operation::OpenPath(path)) => {
+                        Action::Open(gio::File::for_path(path).uri().into())
+                    }
+                    Some(boosters::Operation::Copy(text)) => Action::Copy(text),
+                    Some(boosters::Operation::OpenRepo(path)) => {
+                        Action::Open(gio::File::for_path(path).uri().into())
+                    }
+                    Some(op) => Action::Booster(op),
+                    None => Action::Noop,
+                };
+                let mut row = item(
+                    &format!("booster:{query:?}:{n}"),
+                    &e.title,
+                    &e.detail,
+                    match &query {
+                        boosters::Query::Search(_) => "document-open-recent-symbolic",
+                        boosters::Query::Pim(pim::Kind::Contacts, _) => "avatar-default-symbolic",
+                        boosters::Query::Pim(pim::Kind::Calendar, _) => {
+                            "x-office-calendar-symbolic"
+                        }
+                        _ => "utilities-terminal-symbolic",
+                    },
+                    e.badge,
+                    action,
+                );
+                row.thumbnail = thumbnail;
+                row
+            })
+            .collect()
+    }
+    fn execute_booster(self: &Rc<Self>, operation: boosters::Operation) {
+        if self.booster_busy.replace(true) {
+            self.error("A developer command is still running");
+            return;
+        }
+        self.error("Running command…");
+        let switching = matches!(operation, boosters::Operation::FocusWindow(_));
+        if switching {
+            self.window.set_visible(false);
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            if switching {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            let _ = tx.send(boosters::execute(operation));
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let result = match rx.try_recv() {
+                Ok(result) => result,
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(_) => Err("Command interrupted".into()),
+            };
+            ui.booster_busy.set(false);
+            if switching && result.is_err() {
+                ui.window.present();
+            }
+            ui.booster_cache.borrow_mut().clear();
+            ui.refresh();
+            ui.error(match &result {
+                Ok(message) | Err(message) => message,
+            });
+            glib::ControlFlow::Break
+        });
+    }
+    fn toggle_desktop_snippets(self: &Rc<Self>) {
+        if !self.can_save {
+            self.error("Saved data is unreadable; cannot change snippet settings");
+            return;
+        }
+        let mut store = self.store.borrow_mut();
+        store.desktop_snippets = !store.desktop_snippets;
+        let enabled = store.desktop_snippets;
+        if let Err(error) = store.save() {
+            store.desktop_snippets = !enabled;
+            drop(store);
+            self.error(&error);
+            return;
+        }
+        let result = snippets::sync(&store.snippets, enabled);
+        drop(store);
+        self.refresh();
+        if let Err(error) = result {
+            self.error(&error);
+            return;
+        }
+        if enabled {
+            self.start_desktop_snippets();
+        } else {
+            self.desktop_snippets_running.set(false);
+            self.error("Desktop snippet triggers disabled · Spotlight text fields still expand on Space or Tab");
+        }
+    }
+    fn start_desktop_snippets(self: &Rc<Self>) {
+        self.error("Starting desktop snippet expansion…");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let status = boosters::run(Command::new("espanso").arg("status"), 5);
+            let result = if status
+                .as_ref()
+                .is_ok_and(|s| s.to_lowercase().contains("is running"))
+            {
+                Ok(String::new())
+            } else {
+                boosters::run(Command::new("espanso").args(["start", "--unmanaged"]), 15)
+            };
+            let _ = tx.send(result);
+        });
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local(Duration::from_millis(100), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if !ui.store.borrow().desktop_snippets {
+                return glib::ControlFlow::Break;
+            }
+            match rx.try_recv() {
+                Ok(Ok(_)) => {
+                    ui.desktop_snippets_running.set(true);
+                    ui.error("Desktop expansion enabled · create a snippet trigger, then type it followed by Space");
+                }
+                Ok(Err(error)) => {
+                    ui.desktop_snippets_running.set(false);
+                    ui.error(&format!("Triggers saved. Install and configure Espanso for your desktop first: {error}. See Settings → Text Expansion Setup. Expansion inside Spotlight remains available."));
+                }
+                Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(_) => ui.error("Could not start desktop expansion"),
+            }
+            glib::ControlFlow::Break
+        });
+    }
+    fn snippet_text_keys(self: &Rc<Self>, text: &gtk::TextView) {
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        let view = text.downgrade();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if ![gdk::Key::space, gdk::Key::Tab].contains(&key)
+                || modifiers.intersects(
+                    gdk::ModifierType::CONTROL_MASK
+                        | gdk::ModifierType::ALT_MASK
+                        | gdk::ModifierType::SHIFT_MASK,
+                )
+            {
+                return glib::Propagation::Proceed;
+            }
+            let (Some(ui), Some(view)) = (weak.upgrade(), view.upgrade()) else {
+                return glib::Propagation::Proceed;
+            };
+            if ui.desktop_snippets_running.get() {
+                return glib::Propagation::Proceed;
+            }
+            let buffer = view.buffer();
+            if buffer.has_selection() {
+                return glib::Propagation::Proceed;
+            }
+            let mut end = buffer.iter_at_offset(buffer.cursor_position());
+            let prefix = buffer.text(&buffer.start_iter(), &end, false);
+            let expansion = snippets::expansion(&prefix, &ui.store.borrow().snippets)
+                .map(|(start, value)| (prefix[..start].chars().count() as i32, value.to_string()));
+            if let Some((start, value)) = expansion {
+                let mut start = buffer.iter_at_offset(start);
+                buffer.begin_user_action();
+                buffer.delete(&mut start, &mut end);
+                buffer.insert(&mut start, &value);
+                if key == gdk::Key::space {
+                    buffer.insert(&mut start, " ");
+                }
+                buffer.end_user_action();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        text.add_controller(keys);
+    }
+    fn expand_search_snippet(&self, key: gdk::Key) -> bool {
+        if self.desktop_snippets_running.get() || self.search.selection_bounds().is_some() {
+            return false;
+        }
+        let text = self.search.text();
+        let cursor = self.search.position().max(0) as usize;
+        let at = text
+            .char_indices()
+            .nth(cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        let prefix = &text[..at];
+        let expansion = snippets::expansion(prefix, &self.store.borrow().snippets)
+            .map(|(start, value)| (start, value.to_string()));
+        let Some((start, value)) = expansion else {
+            return false;
+        };
+        let insert = format!("{value}{}", if key == gdk::Key::space { " " } else { "" });
+        let result = format!("{}{}{}", &text[..start], insert, &text[at..]);
+        let cursor = text[..start].chars().count() + insert.chars().count();
+        self.search.set_text(&result);
+        self.search.set_position(cursor as i32);
+        true
+    }
     fn refresh(self: &Rc<Self>) {
         let query = self.search.text().to_string();
         let q = query.trim();
         let page = *self.page.borrow();
+        if self
+            .extension_session
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| page != Page::Root || s.key != q)
+        {
+            self.extension_session.borrow_mut().take();
+        }
         self.section.set_text(page.title());
-        if page == Page::Root && !q.is_empty() {
+        if page == Page::Root
+            && !q.is_empty()
+            && boosters::Query::parse(q).is_none()
+            && extensions::query(q).is_none()
+        {
             self.load_files();
             if *self.file_loading.borrow() {
                 self.section.set_text("Searching · indexing your files…");
@@ -1490,27 +3121,7 @@ impl Ui {
                 }
                 self.file_items(q)
             }
-            Page::Clipboard => self
-                .clips
-                .borrow()
-                .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    item(
-                        &format!("clip:{i}"),
-                        &s.lines()
-                            .next()
-                            .unwrap_or("Text")
-                            .chars()
-                            .take(100)
-                            .collect::<String>(),
-                        &format!("{} characters · Enter to copy", s.chars().count()),
-                        "edit-paste-symbolic",
-                        "Text",
-                        Action::Copy(s.clone()),
-                    )
-                })
-                .collect(),
+            Page::Clipboard => self.clipboard_items(),
             Page::Snippets | Page::Links | Page::Notes => {
                 let store = self.store.borrow();
                 let source = match page {
@@ -1525,13 +3136,21 @@ impl Ui {
                         item(
                             &format!("text:{i}"),
                             &s.name,
-                            &s.value
-                                .lines()
-                                .next()
-                                .unwrap_or("")
-                                .chars()
-                                .take(100)
-                                .collect::<String>(),
+                            &format!(
+                                "{}{}",
+                                if page == Page::Snippets && !s.trigger.is_empty() {
+                                    format!("{} → ", s.trigger)
+                                } else {
+                                    String::new()
+                                },
+                                s.value
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(100)
+                                    .collect::<String>()
+                            ),
                             if page == Page::Links {
                                 "web-browser-symbolic"
                             } else {
@@ -1586,17 +3205,20 @@ impl Ui {
                     })
                     .collect()
             }
-            Page::Emoji => emoji_items(),
+            Page::Emoji => self.emoji_items(),
             Page::Fonts => self.font_items(),
             Page::Colors => self.color_items(),
         };
         if page == Page::Root && !q.is_empty() {
-            items.extend(emoji_items());
+            items.extend(self.emoji_items());
             items.extend(self.file_items(q));
             items.extend(self.font_items());
             if self.picked_color.borrow().is_some() {
                 items.extend(self.color_items());
             }
+        }
+        if page == Page::Scripts {
+            items.extend(self.extension_menu());
         }
         let store = self.store.borrow();
         let mut ranked: Vec<_> = items
@@ -1612,7 +3234,10 @@ impl Ui {
                     if let Action::Copy(ref text) = i.action {
                         core::score(q, text)
                     } else {
-                        None
+                        core::score(
+                            q,
+                            &format!("{} {} image picture screenshot", i.title, i.subtitle),
+                        )
                     }
                 } else {
                     core::score(q, &i.title)
@@ -1624,6 +3249,11 @@ impl Ui {
                     } else {
                         0
                     }) + store.usage.get(&i.id).copied().unwrap_or(0).min(100) as i32
+                        + if i.badge == "Recent" {
+                            if q.is_empty() { 180 } else { 80 }
+                        } else {
+                            0
+                        }
                         + if q.is_empty() && matches!(i.action, Action::Page(_)) {
                             25
                         } else {
@@ -1632,7 +3262,7 @@ impl Ui {
                 } else {
                     0
                 };
-                Some((s + bonus, i))
+                Some((s + bonus + i.priority, i))
             })
             .collect();
         if page == Page::Emoji && q.is_empty() {
@@ -1799,6 +3429,23 @@ impl Ui {
                 )),
             ));
         }
+        if page == Page::Root
+            && let Some(command) = boosters::Query::parse(q)
+        {
+            let web = results.into_iter().find(|i| i.id == "web");
+            results = self.booster_items(command);
+            if let Some(web) = web {
+                results.push(web);
+            }
+            self.section.set_text("Spotlight tools · Ctrl+R refreshes");
+        }
+        if page == Page::Root
+            && let Some((id, args)) = extensions::query(q)
+        {
+            results = self.extension_items(q, id, args);
+            self.section
+                .set_text("Extension results · Escape cancels · Ctrl+R reruns");
+        }
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -1826,10 +3473,126 @@ impl Ui {
             },
         );
     }
-    fn row(&self, i: &Item) -> gtk::ListBoxRow {
+    fn open_uri(&self, uri: &str) -> Result<(), String> {
+        gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>)
+            .map_err(|e| e.to_string())?;
+        if uri.starts_with("file:")
+            && let Some(path) = gio::File::for_uri(uri).path()
+            && path.exists()
+        {
+            gtk::RecentManager::default().add_item(uri);
+            let now = glib::DateTime::now_utc().map(|d| d.to_unix()).unwrap_or(0);
+            let mut recents = self.recents.borrow_mut();
+            recents.retain(|(p, _)| p != &path);
+            recents.insert(0, (path, now));
+            recents.truncate(300);
+            self.booster_cache
+                .borrow_mut()
+                .retain(|q, _| !matches!(q, boosters::Query::Search(search::Query::Recent(_))));
+        }
+        Ok(())
+    }
+    fn text_preview(self: &Rc<Self>, title: &str, text: &str, open: Option<&str>) {
+        if let Some(old) = self.preview_window.borrow_mut().take() {
+            old.close();
+        }
+        let dialog = gtk::Window::builder()
+            .title(title)
+            .transient_for(&self.window)
+            .modal(true)
+            .destroy_with_parent(true)
+            .default_width(700)
+            .default_height(500)
+            .build();
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        panel.add_css_class("editor");
+        let heading = gtk::Label::new(Some(title));
+        heading.set_xalign(0.);
+        heading.add_css_class("item-title");
+        panel.append(&heading);
+        let view = gtk::TextView::new();
+        view.set_editable(false);
+        view.set_cursor_visible(true);
+        view.set_monospace(true);
+        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        view.buffer().set_text(text);
+        panel.append(
+            &gtk::ScrolledWindow::builder()
+                .child(&view)
+                .vexpand(true)
+                .min_content_height(300)
+                .build(),
+        );
+        let status = gtk::Label::new(None);
+        status.set_wrap(true);
+        panel.append(&status);
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        buttons.set_halign(gtk::Align::End);
+        let copy = gtk::Button::with_label("Copy All");
+        let body = text.to_owned();
+        let clipboard = self.window.clipboard();
+        let label = status.clone();
+        copy.connect_clicked(move |_| {
+            clipboard.set_text(&body);
+            label.set_text("Copied");
+        });
+        buttons.append(&copy);
+        if let Some(uri) = open {
+            let button = gtk::Button::with_label("Open in App");
+            let uri = uri.to_owned();
+            let status = status.clone();
+            let weak = Rc::downgrade(self);
+            button.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade()
+                    && let Err(error) = ui.open_uri(&uri)
+                {
+                    status.set_text(&error.to_string());
+                }
+            });
+            buttons.append(&button);
+        }
+        let close = gtk::Button::with_label("Close");
+        let d = dialog.downgrade();
+        close.connect_clicked(move |_| {
+            if let Some(d) = d.upgrade() {
+                d.close();
+            }
+        });
+        buttons.append(&close);
+        panel.append(&buttons);
+        dialog.set_child(Some(&panel));
+        let keys = gtk::EventControllerKey::new();
+        let d = dialog.downgrade();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                if let Some(d) = d.upgrade() {
+                    d.close();
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        dialog.add_controller(keys);
+        *self.preview_window.borrow_mut() = Some(dialog.clone());
+        dialog.present();
+    }
+    fn row(self: &Rc<Self>, i: &Item) -> gtk::ListBoxRow {
         let row = gtk::ListBoxRow::new();
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        if let Some(icon) = &i.gicon {
+        if let Some(texture) = &i.image {
+            let image = gtk::Image::from_paintable(Some(texture));
+            image.set_pixel_size(42);
+            image.add_css_class("tile");
+            line.append(&image);
+        } else if let Some(path) = &i.thumbnail {
+            let image = gtk::Image::from_icon_name("image-x-generic-symbolic");
+            image.set_pixel_size(42);
+            image.add_css_class("tile");
+            image.set_tooltip_text(Some(&path.display().to_string()));
+            self.thumbnail(path, &image);
+            line.append(&image);
+        } else if let Some(icon) = &i.gicon {
             let image = gtk::Image::from_gicon(icon);
             image.set_pixel_size(28);
             image.add_css_class("tile");
@@ -1865,6 +3628,11 @@ impl Ui {
         let title = gtk::Label::new(Some(&i.title));
         title.set_xalign(0.);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        if i.id.starts_with("booster:Define") {
+            title.set_ellipsize(gtk::pango::EllipsizeMode::None);
+            title.set_wrap(true);
+            title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        }
         title.add_css_class("item-title");
         texts.append(&title);
         if !i.subtitle.is_empty() {
@@ -1890,20 +3658,70 @@ impl Ui {
         row
     }
     fn launch(self: &Rc<Self>, i: Item) {
+        if i.id.starts_with("emoji:")
+            && let Action::Copy(symbol) = &i.action
+            && let Some(tone) = emoji::tone(symbol)
         {
+            let mut store = self.store.borrow_mut();
+            store.emoji_skin_tone = Some(tone);
+            store.emoji_tones.insert(emoji::base(symbol), tone);
+        }
+        if !i.id.starts_with("booster:") && !i.id.starts_with("extension-result:") {
             let mut store = self.store.borrow_mut();
             let n = store.usage.entry(i.id.clone()).or_default();
             *n = n.saturating_add(1);
+            drop(store);
+            self.save();
         }
-        self.save();
         let result: Result<(), String> = match i.action {
+            Action::Extension(manifest) => {
+                self.open_extension(manifest);
+                return;
+            }
+            Action::RunExtension {
+                manifest,
+                args,
+                key,
+            } => {
+                self.start_extension(manifest, args, key, false);
+                self.refresh();
+                return;
+            }
+            Action::ClipboardImage(path) => {
+                self.clipboard_image(path, false);
+                return;
+            }
+            Action::ClipboardTexture(texture) => {
+                self.window.clipboard().set_texture(&texture);
+                self.error("Image copied · paste it into your target app");
+                return;
+            }
+            Action::EmojiTones => {
+                self.emoji_tones();
+                return;
+            }
+            Action::Preview { title, text, open } => {
+                self.text_preview(&title, &text, open.as_deref());
+                return;
+            }
+            Action::DesktopSnippets => {
+                self.toggle_desktop_snippets();
+                return;
+            }
+            Action::Query(query) => {
+                self.page(Page::Root);
+                self.search.set_text(&query);
+                self.search.set_position(-1);
+                return;
+            }
+            Action::Booster(operation) => {
+                self.execute_booster(operation);
+                return;
+            }
             Action::App(app) => app
                 .launch(&[], None::<&gio::AppLaunchContext>)
                 .map_err(|e| e.to_string()),
-            Action::Open(uri) => {
-                gio::AppInfo::launch_default_for_uri(&uri, None::<&gio::AppLaunchContext>)
-                    .map_err(|e| e.to_string())
-            }
+            Action::Open(uri) => self.open_uri(&uri),
             Action::QuickNote(initial) => {
                 self.quick_note(&initial);
                 return;
@@ -1952,6 +3770,18 @@ impl Ui {
             }
             Action::PickColor => {
                 self.pick_color();
+                return;
+            }
+            Action::MeasureScreen => {
+                self.measure_screen();
+                return;
+            }
+            Action::Caffeinate => {
+                self.toggle_caffeinate();
+                return;
+            }
+            Action::Desktop(command) => {
+                self.desktop_command(command);
                 return;
             }
             Action::Noop => return,
@@ -2133,7 +3963,25 @@ impl Ui {
             name.set_text(&s.name);
         }
         container.append(&name);
+        let trigger = gtk::Entry::builder()
+            .placeholder_text("Trigger word (optional), for example ;sig")
+            .build();
+        if page == Page::Snippets {
+            if let Some(s) = &old {
+                trigger.set_text(&s.trigger);
+            }
+            container.append(&trigger);
+            let help = gtk::Label::new(Some(
+                "Type the trigger then Space or Tab in Spotlight. Enable Desktop Snippet Expansion to use triggers across apps (Espanso required).",
+            ));
+            help.set_wrap(true);
+            help.set_xalign(0.);
+            container.append(&help);
+        }
         let value = gtk::TextView::new();
+        if page == Page::Notes {
+            self.snippet_text_keys(&value);
+        }
         value.set_wrap_mode(gtk::WrapMode::WordChar);
         if let Some(s) = &old {
             value.buffer().set_text(&s.value);
@@ -2178,12 +4026,31 @@ impl Ui {
                 return;
             }
             let mut s = ui.store.borrow_mut();
+            let trigger = if page == Page::Snippets {
+                trigger.text().trim().to_string()
+            } else {
+                String::new()
+            };
+            if page == Page::Snippets
+                && let Err(error) = snippets::validate(&trigger, &s.snippets, index)
+            {
+                status.set_text(&error);
+                return;
+            }
+            if !ui.can_save {
+                status.set_text("Saved data is unreadable; editing is disabled");
+                return;
+            }
             let list = match page {
                 Page::Snippets => &mut s.snippets,
                 Page::Links => &mut s.links,
                 _ => &mut s.notes,
             };
-            let entry = TextItem { name: n, value: v };
+            let entry = TextItem {
+                name: n,
+                value: v,
+                trigger,
+            };
             if let Some(index) = index {
                 if let Some(i) = list.get_mut(index) {
                     *i = entry;
@@ -2239,6 +4106,28 @@ impl Ui {
         font_buttons.append(&search_fonts);
         font_buttons.append(&reset_font);
         panel.append(&font_buttons);
+        let expansion = gtk::Button::with_label(if self.store.borrow().desktop_snippets {
+            "Disable Desktop Snippet Expansion"
+        } else {
+            "Enable Desktop Snippet Expansion"
+        });
+        let setup = gtk::LinkButton::with_label(
+            "https://espanso.org/docs/install/linux/",
+            "Text Expansion Setup",
+        );
+        panel.append(&expansion);
+        panel.append(&setup);
+        let weak = Rc::downgrade(self);
+        expansion.connect_clicked(move |button| {
+            if let Some(ui) = weak.upgrade() {
+                ui.toggle_desktop_snippets();
+                button.set_label(if ui.store.borrow().desktop_snippets {
+                    "Disable Desktop Snippet Expansion"
+                } else {
+                    "Enable Desktop Snippet Expansion"
+                });
+            }
+        });
         let weak = Rc::downgrade(self);
         let parent = dialog.downgrade();
         search_fonts.connect_clicked(move |_| {
@@ -2422,6 +4311,35 @@ impl Ui {
         let popup = gtk::Popover::new();
         popup.set_parent(button);
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        if let Some(selected) = self.selected() {
+            match selected.action {
+                Action::ClipboardImage(path) => {
+                    let preview = gtk::Button::with_label("Preview Image");
+                    let weak = Rc::downgrade(self);
+                    let pop = popup.clone();
+                    preview.connect_clicked(move |_| {
+                        pop.popdown();
+                        if let Some(ui) = weak.upgrade() {
+                            ui.clipboard_image(path.clone(), true);
+                        }
+                    });
+                    menu.append(&preview);
+                }
+                Action::ClipboardTexture(texture) => {
+                    let preview = gtk::Button::with_label("Preview Image");
+                    let weak = Rc::downgrade(self);
+                    let pop = popup.clone();
+                    preview.connect_clicked(move |_| {
+                        pop.popdown();
+                        if let Some(ui) = weak.upgrade() {
+                            ui.image_preview(&texture);
+                        }
+                    });
+                    menu.append(&preview);
+                }
+                _ => {}
+            }
+        }
         for (name, action) in [
             ("Open / run                     ↵", 0),
             ("Toggle favorite              Ctrl+F", 1),
@@ -2545,73 +4463,93 @@ fn applications() -> Vec<Item> {
         })
         .collect()
 }
+fn window_shortcuts_item() -> Item {
+    let mut entry = item(
+        "window-shortcuts",
+        "Customize Window Shortcuts",
+        "Open KDE's shortcut editor for KWin · assign keys, then Apply",
+        "preferences-desktop-keyboard-shortcuts-symbolic",
+        "Settings",
+        Action::System(vec![
+            "kcmshell6".into(),
+            "--args".into(),
+            "kwin".into(),
+            "kcm_keys".into(),
+        ]),
+    );
+    entry.keywords = "window manager customize customise costumize custom keyboard shortcuts hotkeys keybindings kwin".into();
+    entry
+}
 fn window_items() -> Vec<Item> {
-    [
-        (
-            "Left Half",
-            "Window Quick Tile Left",
-            "Tile to the left half",
-        ),
-        (
-            "Right Half",
-            "Window Quick Tile Right",
-            "Tile to the right half",
-        ),
-        ("Top Half", "Window Quick Tile Top", "Tile to the top half"),
-        (
-            "Bottom Half",
-            "Window Quick Tile Bottom",
-            "Tile to the bottom half",
-        ),
-        (
-            "Top Left Quarter",
-            "Window Quick Tile Top Left",
-            "Tile to the top left corner",
-        ),
-        (
-            "Top Right Quarter",
-            "Window Quick Tile Top Right",
-            "Tile to the top right corner",
-        ),
-        (
-            "Bottom Left Quarter",
-            "Window Quick Tile Bottom Left",
-            "Tile to the bottom left corner",
-        ),
-        (
-            "Bottom Right Quarter",
-            "Window Quick Tile Bottom Right",
-            "Tile to the bottom right corner",
-        ),
-        ("Maximize", "Window Maximize", "Toggle maximized size"),
-        (
-            "Restore",
-            "Window Restore",
-            "Restore the window's previous size",
-        ),
-        (
-            "Minimize",
-            "Window Minimize",
-            "Hide the window in the taskbar",
-        ),
-        (
-            "Next Screen",
-            "Window to Next Screen",
-            "Move to the next monitor",
-        ),
-    ]
-    .into_iter()
-    .map(|(title, shortcut, description)| {
-        item(
-            &format!("window:{shortcut}"),
-            title,
-            description,
-            "view-grid-symbolic",
-            "Window",
-            Action::Window(shortcut),
-        )
-    })
-    .collect()
+    let mut entries = vec![window_shortcuts_item()];
+    entries.extend(
+        [
+            (
+                "Left Half",
+                "Window Quick Tile Left",
+                "Tile to the left half",
+            ),
+            (
+                "Right Half",
+                "Window Quick Tile Right",
+                "Tile to the right half",
+            ),
+            ("Top Half", "Window Quick Tile Top", "Tile to the top half"),
+            (
+                "Bottom Half",
+                "Window Quick Tile Bottom",
+                "Tile to the bottom half",
+            ),
+            (
+                "Top Left Quarter",
+                "Window Quick Tile Top Left",
+                "Tile to the top left corner",
+            ),
+            (
+                "Top Right Quarter",
+                "Window Quick Tile Top Right",
+                "Tile to the top right corner",
+            ),
+            (
+                "Bottom Left Quarter",
+                "Window Quick Tile Bottom Left",
+                "Tile to the bottom left corner",
+            ),
+            (
+                "Bottom Right Quarter",
+                "Window Quick Tile Bottom Right",
+                "Tile to the bottom right corner",
+            ),
+            ("Maximize", "Window Maximize", "Toggle maximized size"),
+            (
+                "Restore",
+                "Window Restore",
+                "Restore the window's previous size",
+            ),
+            (
+                "Minimize",
+                "Window Minimize",
+                "Hide the window in the taskbar",
+            ),
+            (
+                "Next Screen",
+                "Window to Next Screen",
+                "Move to the next monitor",
+            ),
+        ]
+        .into_iter()
+        .map(|(title, shortcut, description)| {
+            item(
+                &format!("window:{shortcut}"),
+                title,
+                description,
+                "view-grid-symbolic",
+                "Window",
+                Action::Window(shortcut),
+            )
+        }),
+    );
+    entries
 }
 
 fn emoji_items() -> Vec<Item> {
@@ -2687,6 +4625,10 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     windows.add_css_class("flat");
     windows.set_tooltip_text(Some("Window Manager"));
     top.append(&windows);
+    let window_shortcuts = gtk::Button::with_label("Customize Shortcuts");
+    window_shortcuts.set_tooltip_text(Some("Customize KWin's window shortcuts in KDE Settings"));
+    window_shortcuts.set_visible(false);
+    top.append(&window_shortcuts);
     let settings = gtk::Button::from_icon_name("emblem-system-symbolic");
     settings.add_css_class("flat");
     settings.set_tooltip_text(Some("Settings"));
@@ -2721,6 +4663,11 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     hint.set_xalign(0.);
     hint.set_margin_start(16);
     footer.append(&hint);
+    let awake_status = gtk::Label::new(Some("☕ Awake"));
+    awake_status.set_tooltip_text(Some("Caffeinate is on · search Caffeinate to turn it off"));
+    awake_status.add_css_class("notice");
+    awake_status.set_visible(false);
+    footer.append(&awake_status);
     let open = gtk::Button::with_label("Open  ↵");
     open.add_css_class("flat");
     footer.append(&open);
@@ -2760,8 +4707,10 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         section,
         notice,
         hint,
+        awake_status,
         add,
         back,
+        window_shortcuts,
         store: RefCell::new(store),
         can_save: load_error.is_none(),
         page: RefCell::new(Page::Root),
@@ -2773,11 +4722,38 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         file_loading: RefCell::new(false),
         files_ready: RefCell::new(false),
         clips: RefCell::new(Vec::new()),
+        clip_images: RefCell::new(Vec::new()),
+        clip_current: RefCell::new(None),
+        clip_generation: Cell::new(0),
+        _window_bridge: windowing::register().ok(),
+        extensions: RefCell::new(Vec::new()),
+        extension_errors: RefCell::new(Vec::new()),
+        extensions_loading: Cell::new(false),
+        extension_session: RefCell::new(None),
         result_limit: Cell::new(60),
         currency: RefCell::new(currency::State::default()),
+        booster_cache: RefCell::new(std::collections::HashMap::new()),
+        booster_pending: RefCell::new(std::collections::HashSet::new()),
+        booster_busy: Cell::new(false),
+        desktop_snippets_running: Cell::new(false),
+        recents: RefCell::new(Vec::new()),
+        recents_loading: Cell::new(false),
+        thumbnails: RefCell::new(search::Thumbnails::default()),
+        thumbnail_targets: RefCell::new(std::collections::HashMap::new()),
+        thumbnails_polling: Cell::new(false),
+        preview_window: RefCell::new(None),
         picker: RefCell::new(None),
         picking_color: Cell::new(false),
         picked_color: RefCell::new(None),
+        measurement_request: RefCell::new(None),
+        measuring_screen: Cell::new(false),
+        measurement_window: RefCell::new(None),
+        caffeinate: RefCell::new(None),
+        desktop_snapshot: RefCell::new(desktop::Snapshot::default()),
+        desktop_loading: Cell::new(false),
+        desktop_busy: Cell::new(false),
+        desktop_generation: Cell::new(0),
+        trash_dialog: RefCell::new(None),
         reminder_clock: RefCell::new(None),
         note_editor: RefCell::new(None),
         note_draft: RefCell::new(String::new()),
@@ -2793,6 +4769,11 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     let u = Rc::clone(&ui);
     ui.search.connect_changed(move |_| {
         u.result_limit.set(60);
+        if u.search.text().trim().eq_ignore_ascii_case("uuid") {
+            u.booster_cache
+                .borrow_mut()
+                .remove(&boosters::Query::Text(texttools::Query::Uuid));
+        }
         u.refresh();
     });
     let u = Rc::clone(&ui);
@@ -2814,6 +4795,9 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     let u = Rc::clone(&ui);
     windows.connect_clicked(move |_| u.page(Page::Windows));
     let u = Rc::clone(&ui);
+    ui.window_shortcuts
+        .connect_clicked(move |_| u.launch(window_shortcuts_item()));
+    let u = Rc::clone(&ui);
     open.connect_clicked(move |_| u.activate());
     let u = Rc::clone(&ui);
     actions.connect_clicked(move |b| u.actions(b));
@@ -2833,6 +4817,14 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         }
         if ctrl {
             match key {
+                gdk::Key::r | gdk::Key::R => {
+                    if *u.page.borrow() == Page::Clipboard {
+                        u.load_clipboard();
+                    }
+                    u.extension_session.borrow_mut().take();
+                    u.booster_cache.borrow_mut().clear();
+                    u.refresh();
+                }
                 gdk::Key::Return | gdk::Key::KP_Enter if *u.page.borrow() == Page::Root => {
                     let web = u
                         .visible
@@ -2859,6 +4851,14 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
             };
             return glib::Propagation::Stop;
         }
+        if [gdk::Key::space, gdk::Key::Tab].contains(&key)
+            && !mods.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK)
+            && gtk::prelude::GtkWindowExt::focus(&u.window)
+                .is_some_and(|focus| focus == u.search || focus.is_ancestor(&u.search))
+            && u.expand_search_snippet(key)
+        {
+            return glib::Propagation::Stop;
+        }
         if key == gdk::Key::Down || key == gdk::Key::Up {
             let total = u.visible.borrow().len() as i32;
             if total > 0 {
@@ -2879,6 +4879,14 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         glib::Propagation::Proceed
     });
     ui.window.add_controller(keys);
+    let weak = Rc::downgrade(&ui);
+    ui.window.connect_visible_notify(move |w| {
+        if !w.is_visible()
+            && let Some(ui) = weak.upgrade()
+        {
+            ui.extension_session.borrow_mut().take();
+        }
+    });
     ui.window.connect_close_request(|w| {
         w.set_visible(false);
         glib::Propagation::Stop
@@ -2887,7 +4895,19 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     ui.window.present();
     ui.search.grab_focus();
     if !std::env::args().any(|a| a == "--smoke-test") {
+        ui.load_desktop();
         ui.arm_reminders();
+        if ui.can_save && ui.store.borrow().desktop_snippets {
+            let result = {
+                let store = ui.store.borrow();
+                snippets::sync(&store.snippets, true)
+            };
+            if let Err(error) = result {
+                ui.error(&error);
+            } else {
+                ui.start_desktop_snippets();
+            }
+        }
     }
     ui
 }
@@ -3140,6 +5160,988 @@ fn smoke_alarm(ui: Rc<Ui>) {
             }
             glib::ControlFlow::Continue
         });
+    });
+}
+fn capture_test_window(window: &gtk::Window, path: &str) {
+    let paint = gtk::WidgetPaintable::new(Some(window));
+    let snapshot = gtk::Snapshot::new();
+    paint.snapshot(&snapshot, window.width() as f64, window.height() as f64);
+    if let Some(node) = snapshot.to_node()
+        && let Some(renderer) = window.renderer()
+    {
+        renderer
+            .render_texture(&node, None)
+            .save_to_png(path)
+            .unwrap();
+    }
+}
+fn smoke_plus(ui: Rc<Ui>) {
+    assert_eq!(std::env::var("SPOTLIGHT_PLUS_FIXTURES").as_deref(), Ok("1"));
+    assert!(core::data_dir().starts_with("/tmp"));
+    ui.search.set_editable(false);
+    let shield = gtk::EventControllerKey::new();
+    shield.set_propagation_phase(gtk::PropagationPhase::Capture);
+    shield.connect_key_pressed(|_, _, _, _| glib::Propagation::Stop);
+    ui.window.add_controller(shield);
+    type Backup = Option<(Option<gdk::Texture>, Option<String>)>;
+    let backup: Rc<RefCell<Backup>> = Rc::new(RefCell::new(None));
+    let originally_empty = ui.window.clipboard().formats().to_string().is_empty();
+    let saved = backup.clone();
+    let clipboard = ui.window.clipboard();
+    glib::timeout_add_local_once(Duration::from_millis(250), move || {
+        let clip = clipboard.clone();
+        clipboard.read_texture_async(None::<&gio::Cancellable>, move |result| {
+            if let Ok(Some(texture)) = result {
+                *saved.borrow_mut() = Some((Some(texture), None));
+            } else {
+                clip.read_text_async(None::<&gio::Cancellable>, move |text| {
+                    *saved.borrow_mut() = Some((None, text.ok().flatten().map(|s| s.to_string())));
+                });
+            }
+        });
+    });
+    ui.load_extensions();
+    let mut phase = 0;
+    let started = std::time::Instant::now();
+    let mut phase_at = started;
+    let verified = Rc::new(Cell::new(None));
+    let mut fixture_window = String::new();
+    glib::timeout_add_local(Duration::from_millis(60), move || {
+        assert!(
+            started.elapsed().as_secs() < 35,
+            "Plus UI timed out at phase {phase}: {}",
+            ui.notice.text()
+        );
+        if phase_at.elapsed() < Duration::from_millis(250)
+            || ui.extensions_loading.get()
+            || backup.borrow().is_none()
+        {
+            return glib::ControlFlow::Continue;
+        }
+        let restore = || {
+            if std::env::var_os("SPOTLIGHT_PLUS_SKIP_COPY").is_some() {
+                return;
+            }
+            if let Some((image, text)) = backup.borrow().as_ref() {
+                if let Some(image) = image {
+                    ui.window.clipboard().set_texture(image);
+                } else if let Some(text) = text {
+                    ui.window.clipboard().set_text(text);
+                } else if originally_empty {
+                    let _ = ui
+                        .window
+                        .clipboard()
+                        .set_content(None::<&gdk::ContentProvider>);
+                }
+            }
+        };
+        let can_copy = std::env::var_os("SPOTLIGHT_PLUS_SKIP_COPY").is_none()
+            && backup
+                .borrow()
+                .as_ref()
+                .is_some_and(|(i, t)| i.is_some() || t.is_some() || originally_empty);
+        match phase {
+            0 => {
+                assert_eq!(ui.extensions.borrow().len(), 3);
+                assert!(!ui.extension_errors.borrow().is_empty());
+                ui.search.set_text("ext live stream");
+            }
+            1 => {
+                let session = ui.extension_session.borrow();
+                let Some(s) = session.as_ref() else {
+                    return glib::ControlFlow::Continue;
+                };
+                if s.items.is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(
+                    !s.done,
+                    "First result must arrive while extension is still working"
+                );
+                assert_eq!(s.items[0].title, "First stream");
+            }
+            2 => {
+                if !ui
+                    .extension_session
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|s| s.done)
+                {
+                    return glib::ControlFlow::Continue;
+                }
+                assert_eq!(
+                    ui.extension_session.borrow().as_ref().unwrap().items.len(),
+                    2
+                );
+                assert_eq!(ui.selected().unwrap().title, "First stream");
+                capture_test_window(
+                    ui.window.upcast_ref(),
+                    "/tmp/spotlight-extensions-preview.png",
+                );
+                ui.search.set_text("ext live cancel");
+            }
+            3 => {
+                if !ui
+                    .extension_session
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|s| !s.items.is_empty())
+                {
+                    return glib::ControlFlow::Continue;
+                }
+                ui.search.set_text("hash abc");
+                assert!(ui.extension_session.borrow().is_none());
+            }
+            4 => {
+                let manifest = ui
+                    .extensions
+                    .borrow()
+                    .iter()
+                    .find(|m| m.id == "args")
+                    .unwrap()
+                    .clone();
+                ui.open_extension(manifest);
+            }
+            5 => {
+                let dialog = ui
+                    .window
+                    .application()
+                    .unwrap()
+                    .windows()
+                    .into_iter()
+                    .find(|w| w.title().as_deref() == Some("Argument Echo"))
+                    .unwrap();
+                let input: gtk::Entry = test_widget(dialog.upcast_ref(), &|w| w.is::<gtk::Entry>())
+                    .unwrap()
+                    .downcast()
+                    .unwrap();
+                input.set_text("literal ; $(no shell)");
+                let run: gtk::Button = test_widget(dialog.upcast_ref(), &|w| {
+                    w.clone()
+                        .downcast::<gtk::Button>()
+                        .is_ok_and(|b| b.label().as_deref() == Some("Run Extension"))
+                })
+                .unwrap()
+                .downcast()
+                .unwrap();
+                run.emit_clicked();
+            }
+            6 => {
+                if !ui
+                    .extension_session
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|s| s.done)
+                {
+                    return glib::ControlFlow::Continue;
+                }
+                assert_eq!(ui.visible.borrow()[0].title, "literal ; $(no shell)");
+                ui.search.set_text("ext invalid anything");
+            }
+            7 => {
+                if !ui
+                    .extension_session
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|s| s.done)
+                {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(
+                    ui.extension_session
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .status
+                        .contains("Invalid JSON")
+                );
+                ui.search.set_text("translate en es hello");
+            }
+            8 => {
+                if !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(
+                    matches!(&ui.visible.borrow()[0].action,Action::Preview{text,..}if text.contains("hola"))
+                );
+                ui.page(Page::Clipboard);
+            }
+            9 => {
+                if ui.clip_images.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert_eq!(ui.clip_images.borrow()[0].width, 96);
+                assert_eq!(ui.clip_images.borrow()[0].height, 64);
+                let texture = clipimage::load(&ui.clip_images.borrow()[0].path).unwrap();
+                ui.image_preview(&texture);
+                let preview = ui
+                    .window
+                    .application()
+                    .unwrap()
+                    .windows()
+                    .into_iter()
+                    .find(|w| w.title().as_deref() == Some("Clipboard Image"))
+                    .unwrap();
+                assert!(test_widget(preview.upcast_ref(), &|w| w.is::<gtk::Picture>()).is_some());
+                preview.close();
+                capture_test_window(
+                    ui.window.upcast_ref(),
+                    "/tmp/spotlight-clipboard-images-preview.png",
+                );
+                if can_copy {
+                    let row = ui
+                        .visible
+                        .borrow()
+                        .iter()
+                        .find(|i| matches!(i.action, Action::ClipboardImage(_)))
+                        .unwrap()
+                        .clone();
+                    ui.launch(row);
+                } else {
+                    verified.set(Some(true));
+                }
+            }
+            10 => {
+                if can_copy {
+                    if !ui.notice.text().starts_with("Image copied") {
+                        return glib::ControlFlow::Continue;
+                    }
+                    let saved = backup.clone();
+                    let check = verified.clone();
+                    let clip = ui.window.clipboard();
+                    let restore_clip = clip.clone();
+                    clip.read_texture_async(None::<&gio::Cancellable>, move |result| {
+                        let valid = result.is_ok_and(|image| {
+                            image.is_some_and(|t| t.width() == 96 && t.height() == 64)
+                        });
+                        if let Some((image, text)) = saved.borrow().as_ref() {
+                            if let Some(image) = image {
+                                restore_clip.set_texture(image);
+                            } else if let Some(text) = text {
+                                restore_clip.set_text(text);
+                            } else if originally_empty {
+                                let _ = restore_clip.set_content(None::<&gdk::ContentProvider>);
+                            }
+                        }
+                        check.set(Some(valid));
+                    });
+                }
+            }
+            11 => {
+                let Some(valid) = verified.get() else {
+                    return glib::ControlFlow::Continue;
+                };
+                assert!(valid, "Image copy round trip");
+                ui.page(Page::Root);
+                ui.search.set_text("thumbs up: dark skin tone");
+            }
+            12 => {
+                let row = ui
+                    .visible
+                    .borrow()
+                    .iter()
+                    .find(|i| matches!(&i.action,Action::Copy(s)if s=="👍🏿"))
+                    .unwrap()
+                    .clone();
+                if can_copy {
+                    ui.launch(row);
+                    restore();
+                } else {
+                    ui.store.borrow_mut().emoji_skin_tone = Some(5);
+                    ui.save();
+                }
+                assert_eq!(Store::load().unwrap().emoji_skin_tone, Some(5));
+                assert!(
+                    ui.emoji_items().iter().any(
+                        |i| i.id == "emoji:👋" && matches!(&i.action,Action::Copy(s)if s=="👋🏿")
+                    )
+                );
+                ui.search.set_text("kaomoji shrug");
+            }
+            13 => {
+                assert!(
+                    matches!(&ui.visible.borrow()[0].action,Action::Copy(s)if s=="¯\\_(ツ)_/¯")
+                );
+                let title = std::env::var("SPOTLIGHT_WINDOW_FIXTURE_TITLE").unwrap();
+                ui.search.set_text(&format!("window {title}"));
+            }
+            14 => {
+                if !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                let first = ui.visible.borrow()[0].clone();
+                let Action::Booster(boosters::Operation::FocusWindow(id)) = &first.action else {
+                    panic!(
+                        "Live KWin discovery failed: {} · {}",
+                        first.title, first.subtitle
+                    )
+                };
+                fixture_window = id.clone();
+                capture_test_window(
+                    ui.window.upcast_ref(),
+                    "/tmp/spotlight-window-switcher-preview.png",
+                );
+                ui.launch(first);
+            }
+            15 => {
+                if ui.booster_busy.get() || !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(!ui.window.is_visible(), "Switcher releases launcher focus");
+                assert!(ui.visible.borrow().iter().any(|i|matches!(&i.action,Action::Booster(boosters::Operation::FocusWindow(id))if id==&fixture_window)&&i.subtitle.contains("Active")),"KWin activated the fixture window: {}",ui.notice.text());
+                ui.window.present();
+            }
+            _ => {
+                restore();
+                let root = PathBuf::from(std::env::var_os("SPOTLIGHT_PLUS_ROOT").unwrap());
+                assert!(!root.join("uncancelled").exists());
+                println!(
+                    "Plus UI passed: streamed results, cancellation, argument forms, malformed output, offline lookup, native Klipper images, image preview, copy check={}, emoji preference persistence, kaomoji, live KWin listing and focus",
+                    can_copy
+                );
+                ui.window.application().unwrap().quit();
+                return glib::ControlFlow::Break;
+            }
+        }
+        phase += 1;
+        phase_at = std::time::Instant::now();
+        glib::ControlFlow::Continue
+    });
+}
+fn smoke_search_tools(ui: Rc<Ui>) {
+    assert_eq!(
+        std::env::var("SPOTLIGHT_SEARCH_FIXTURES").as_deref(),
+        Ok("1")
+    );
+    assert!(core::data_dir().starts_with("/tmp"));
+    ui.search.set_editable(false);
+    let shield = gtk::EventControllerKey::new();
+    shield.set_propagation_phase(gtk::PropagationPhase::Capture);
+    shield.connect_key_pressed(|_, _, _, _| glib::Propagation::Stop);
+    ui.window.add_controller(shield);
+    ui.load_recents();
+    ui.search.set_text("uuid");
+    let mut phase = 0;
+    let mut phase_at = std::time::Instant::now();
+    let started = phase_at;
+    let mut uuid = String::new();
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        assert!(
+            started.elapsed().as_secs() < 32,
+            "Search UI timed out at phase {phase}: {}",
+            ui.notice.text()
+        );
+        if !ui.booster_pending.borrow().is_empty()
+            || ui.recents_loading.get()
+            || ui.thumbnails_polling.get()
+            || phase_at.elapsed() < Duration::from_millis(500)
+        {
+            return glib::ControlFlow::Continue;
+        }
+        let first = ui.visible.borrow().first().cloned().unwrap();
+        match phase {
+            0 => {
+                assert!(matches!(&first.action,Action::Copy(s) if s.len()==36));
+                uuid = first.title;
+                ui.search.set_text("hash abc");
+            }
+            1 => {
+                assert_eq!(
+                    first.title,
+                    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+                );
+                ui.search.set_text("uuid");
+            }
+            2 => {
+                assert_ne!(first.title, uuid);
+                ui.search.set_text("base64 encode café");
+            }
+            3 => {
+                assert_eq!(first.title, "Y2Fmw6k=");
+                ui.search.set_text("base64 decode Y2Fmw6k=");
+            }
+            4 => {
+                assert_eq!(first.title, "café");
+                ui.search.set_text("tldr tar");
+            }
+            5 => {
+                assert!(
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .filter(|i| i.badge == "Example")
+                        .count()
+                        >= 6
+                );
+                assert!(matches!(first.action, Action::Preview { .. }));
+                ui.activate();
+            }
+            6 => {
+                let dialog = ui.preview_window.borrow().as_ref().unwrap().clone();
+                let text: gtk::TextView =
+                    test_widget(dialog.upcast_ref(), &|w| w.is::<gtk::TextView>())
+                        .unwrap()
+                        .downcast()
+                        .unwrap();
+                assert!(
+                    text.buffer()
+                        .text(
+                            &text.buffer().start_iter(),
+                            &text.buffer().end_iter(),
+                            false
+                        )
+                        .contains("tar -czf")
+                );
+                capture_test_window(&dialog, "/tmp/spotlight-cheats-preview.png");
+                ui.preview_window.borrow_mut().take().unwrap().close();
+                ui.search.set_text("recent folders");
+            }
+            7 => {
+                assert!(ui.visible.borrow().iter().filter(|i|i.badge=="Recent").all(|i|matches!(&i.action,Action::Open(uri) if gio::File::for_uri(uri).path().unwrap().is_dir())));
+                ui.search.set_text("recent files");
+            }
+            8 => {
+                assert_eq!(first.title, "blue sample.png");
+                assert!(first.thumbnail.is_some());
+                let row = ui.list.row_at_index(0).unwrap();
+                let image: gtk::Image = test_widget(row.upcast_ref(), &|w| w.is::<gtk::Image>())
+                    .unwrap()
+                    .downcast()
+                    .unwrap();
+                assert!(
+                    image.paintable().is_some_and(|p| p.is::<gdk::Texture>()),
+                    "Background image thumbnail decoded"
+                );
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-recents-preview.png");
+                ui.search.set_text("in: notes rust");
+            }
+            9 => {
+                assert!(first.title.starts_with("story.md:2"), "{}", first.title);
+                assert_eq!(
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .filter(|i| i.badge == "Content")
+                        .count(),
+                    1
+                );
+                ui.activate();
+            }
+            10 => {
+                ui.preview_window.borrow_mut().take().unwrap().close();
+                ui.search.set_text("contacts Danny");
+            }
+            11 => {
+                assert_eq!(first.title, "Danny Example");
+                assert!(first.subtitle.contains("danny@example.test"));
+                ui.activate();
+            }
+            12 => {
+                ui.preview_window.borrow_mut().take().unwrap().close();
+                ui.search.set_text("calendar Rust");
+            }
+            13 => {
+                assert_eq!(first.title, "Rust meetup");
+                assert!(first.subtitle.contains("2026-10-20 18:00"));
+                ui.activate();
+            }
+            14 => {
+                let dialog = ui.preview_window.borrow_mut().take().unwrap();
+                let text: gtk::TextView =
+                    test_widget(dialog.upcast_ref(), &|w| w.is::<gtk::TextView>())
+                        .unwrap()
+                        .downcast()
+                        .unwrap();
+                assert!(
+                    text.buffer()
+                        .text(
+                            &text.buffer().start_iter(),
+                            &text.buffer().end_iter(),
+                            false
+                        )
+                        .contains("FREQ=WEEKLY")
+                );
+                dialog.close();
+                ui.search.set_text("base64 decode a!");
+            }
+            15 => {
+                assert!(first.title.contains("Invalid Base64"));
+                ui.page(Page::Root);
+            }
+            16 => {
+                assert!(
+                    ui.visible.borrow().iter().any(|i| i.badge == "Recent"),
+                    "Recent suggestions on root"
+                );
+                let saved =
+                    std::fs::read_to_string(core::data_dir().join("data.json")).unwrap_or_default();
+                assert!(
+                    !saved.contains("hash abc") && !saved.contains("contacts Danny"),
+                    "Search content is not persisted in usage history"
+                );
+                println!(
+                    "Search UI passed: UUID regeneration, hash/Base64 vectors, inline cheat sheets, actual XDG recency and folders, async image thumbnails, real ripgrep content results, local PIM previews, invalid input, and private usage history"
+                );
+                ui.window.application().unwrap().quit();
+                return glib::ControlFlow::Break;
+            }
+            _ => unreachable!(),
+        }
+        phase += 1;
+        phase_at = std::time::Instant::now();
+        glib::ControlFlow::Continue
+    });
+}
+fn smoke_boosters(ui: Rc<Ui>) {
+    // Keep typing in the real desktop from changing the isolated fixture query.
+    ui.search.set_editable(false);
+    let shield = gtk::EventControllerKey::new();
+    shield.set_propagation_phase(gtk::PropagationPhase::Capture);
+    shield.connect_key_pressed(|_, _, _, _| glib::Propagation::Stop);
+    ui.window.add_controller(shield);
+    assert_eq!(
+        std::env::var("SPOTLIGHT_TEST_TOOLS").as_deref(),
+        Ok("1"),
+        "Run tests/boosters_smoke.py with isolated CLI fixtures"
+    );
+    assert!(core::data_dir().starts_with("/tmp"));
+    ui.store.borrow_mut().snippets.push(TextItem {
+        name: "Signature".into(),
+        trigger: ";sig".into(),
+        value: "Regards, Danny".into(),
+    });
+    ui.save();
+    ui.search.set_text("note café ;sig");
+    ui.search.set_position(-1);
+    assert!(ui.expand_search_snippet(gdk::Key::Tab));
+    assert_eq!(ui.search.text(), "note café Regards, Danny");
+    let text = gtk::TextView::new();
+    ui.snippet_text_keys(&text);
+    text.buffer().set_text(";sig");
+    let controllers = text.observe_controllers();
+    let keys = (0..controllers.n_items())
+        .find_map(|i| {
+            controllers
+                .item(i)?
+                .downcast::<gtk::EventControllerKey>()
+                .ok()
+        })
+        .unwrap();
+    keys.emit_by_name::<bool>(
+        "key-pressed",
+        &[&gdk::Key::Tab, &0u32, &gdk::ModifierType::empty()],
+    );
+    assert_eq!(
+        text.buffer().text(
+            &text.buffer().start_iter(),
+            &text.buffer().end_iter(),
+            false
+        ),
+        "Regards, Danny"
+    );
+    ui.toggle_desktop_snippets();
+    assert!(
+        std::fs::read_to_string(snippets::config_path())
+            .unwrap()
+            .contains(";sig")
+    );
+    ui.toggle_desktop_snippets();
+    assert!(
+        !std::fs::read_to_string(snippets::config_path())
+            .unwrap()
+            .contains(";sig")
+    );
+    let mut child = Command::new("sleep").arg("40").spawn().unwrap();
+    let pid = child.id();
+    ui.search.set_text("define test");
+    let mut phase = 0;
+    let started = std::time::Instant::now();
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        assert!(
+            started.elapsed().as_secs() < 35,
+            "Booster UI test timed out at phase {phase}: {}",
+            ui.notice.text()
+        );
+        if ui.booster_busy.get() || !ui.booster_pending.borrow().is_empty() {
+            return glib::ControlFlow::Continue;
+        }
+        let first = ui.visible.borrow().first().cloned().unwrap();
+        match phase {
+            0 => {
+                assert!(
+                    matches!(first.action, Action::Copy(_)),
+                    "Dictionary row: {}",
+                    first.title
+                );
+                assert!(first.subtitle.contains("noun"));
+                ui.search.set_text("docker web");
+            }
+            1 => {
+                assert!(first.title.starts_with("Stop web"), "{}", first.title);
+                ui.activate();
+            }
+            2 => {
+                assert!(first.title.starts_with("Start web"), "{}", first.title);
+                ui.activate();
+            }
+            3 => {
+                assert!(first.title.starts_with("Stop web"));
+                ui.search.set_text("podman db");
+            }
+            4 => {
+                assert!(first.title.starts_with("Start db"));
+                ui.activate();
+            }
+            5 => {
+                assert!(first.title.starts_with("Stop db"));
+                ui.search.set_text("git sptlt");
+            }
+            6 => {
+                assert!(
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| matches!(i.action, Action::Open(_))),
+                    "Fuzzy repository match"
+                );
+                ui.search.set_text("gh repo view owner/repo");
+            }
+            7 => {
+                assert!(matches!(
+                    first.action,
+                    Action::Booster(boosters::Operation::ViewRemote(_))
+                ));
+                ui.activate();
+            }
+            8 => {
+                assert!(ui.notice.text().contains("Opened repository"));
+                ui.search
+                    .set_text("git clone https://example.com/owner/new-repo.git");
+            }
+            9 => {
+                assert!(matches!(
+                    first.action,
+                    Action::Booster(boosters::Operation::Clone(_))
+                ));
+                ui.activate();
+            }
+            10 => {
+                assert!(core::home().join("Projects/new-repo/.git").exists());
+                ui.search.set_text(&format!("kill {pid}"));
+            }
+            11 => {
+                assert!(
+                    matches!(first.action, Action::Booster(boosters::Operation::Terminate { pid: p, .. }) if p == pid)
+                );
+                ui.activate();
+            }
+            12 => {
+                assert!(child.try_wait().unwrap().is_some());
+                assert_eq!(first.title, "No matching processes");
+                ui.search.set_text("define missing");
+            }
+            13 => {
+                assert!(first.title.contains("No definition found"));
+                // A delayed old lookup must never replace a newer query.
+                ui.search.set_text("define slow");
+            }
+            14 => unreachable!(),
+            15 => {
+                assert!(ui.search.text().starts_with("define test"));
+                assert!(matches!(first.action, Action::Copy(_)));
+            }
+            _ => {
+                println!(
+                    "Booster UI passed: dictionary, fuzzy repositories, clone and gh dispatch, Docker/Podman start/stop, selected-child termination, errors, snippet expansion and desktop sync"
+                );
+                let paint = gtk::WidgetPaintable::new(Some(&ui.window));
+                let snapshot = gtk::Snapshot::new();
+                paint.snapshot(
+                    &snapshot,
+                    ui.window.width() as f64,
+                    ui.window.height() as f64,
+                );
+                if let Some(node) = snapshot.to_node()
+                    && let Some(renderer) = ui.window.renderer()
+                {
+                    renderer
+                        .render_texture(&node, None)
+                        .save_to_png("/tmp/spotlight-boosters-preview.png")
+                        .unwrap();
+                }
+                ui.window.application().unwrap().quit();
+                return glib::ControlFlow::Break;
+            }
+        }
+        phase += 1;
+        if phase == 14 {
+            let weak = Rc::downgrade(&ui);
+            glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.search.set_text("define test");
+                }
+            });
+            phase = 15;
+        }
+        glib::ControlFlow::Continue
+    });
+}
+fn smoke_desktop_commands(ui: Rc<Ui>) {
+    ui.load_desktop();
+    let started = std::time::Instant::now();
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        assert!(started.elapsed().as_secs() < 20, "Desktop status timed out");
+        if ui.desktop_loading.get() {
+            return glib::ControlFlow::Continue;
+        }
+        let status = ui.desktop_snapshot.borrow().clone();
+        assert!(status.speakers.is_ok(), "{:?}", status.speakers);
+        assert!(status.mic.is_ok(), "{:?}", status.mic);
+        assert!(status.wifi.is_ok(), "{:?}", status.wifi);
+        assert!(status.bluetooth.is_ok(), "{:?}", status.bluetooth);
+        assert!(status.dnd.is_ok(), "{:?}", status.dnd);
+        assert!(status.theme.is_ok(), "{:?}", status.theme);
+        ui.page(Page::Windows);
+        assert!(ui.window_shortcuts.is_visible());
+        assert_eq!(
+            ui.visible
+                .borrow()
+                .iter()
+                .filter(|i| matches!(i.action, Action::Window(_)))
+                .count(),
+            12
+        );
+        ui.search.set_text("customize shortcuts");
+        assert_eq!(ui.visible.borrow()[0].id, "window-shortcuts");
+        assert!(
+            matches!(&ui.visible.borrow()[0].action, Action::System(args)
+            if args == &["kcmshell6", "--args", "kwin", "kcm_keys"])
+        );
+        ui.page(Page::Root);
+        assert!(!ui.window_shortcuts.is_visible());
+        ui.search.set_text("window shortcuts");
+        assert!(
+            ui.visible
+                .borrow()
+                .iter()
+                .any(|i| i.id == "window-shortcuts")
+        );
+        println!(
+            "Window shortcut customization passed: visible button, KWin editor arguments, search in Window Manager and main search, twelve window actions retained"
+        );
+        for (query, expected) in [
+            ("empty trash", desktop::Command::EmptyTrash),
+            ("dark mode", desktop::Command::DarkMode),
+            ("volume up", desktop::Command::VolumeUp),
+            ("volume down", desktop::Command::VolumeDown),
+            ("speaker mute", desktop::Command::VolumeMute),
+            ("mic up", desktop::Command::MicUp),
+            ("mic down", desktop::Command::MicDown),
+            ("mic mute", desktop::Command::MicMute),
+            ("wifi", desktop::Command::Wifi),
+            ("blutooth", desktop::Command::Bluetooth),
+            ("do not disturb", desktop::Command::DoNotDisturb),
+            ("dnd", desktop::Command::DoNotDisturb),
+        ] {
+            ui.search.set_text(query);
+            assert!(
+                ui.visible
+                    .borrow()
+                    .iter()
+                    .any(|i| matches!(i.action, Action::Desktop(c) if c == expected)),
+                "Command search: {query}"
+            );
+        }
+        ui.search.set_text("empty trash");
+        let index = ui
+            .visible
+            .borrow()
+            .iter()
+            .position(|i| matches!(i.action, Action::Desktop(desktop::Command::EmptyTrash)))
+            .unwrap();
+        ui.list
+            .select_row(ui.list.row_at_index(index as i32).as_ref());
+        ui.activate();
+        assert!(
+            !ui.desktop_busy.get(),
+            "Trash must not empty before confirmation"
+        );
+        let dialog = ui.trash_dialog.borrow().as_ref().unwrap().clone();
+        assert!(dialog.is_modal());
+        let cancel: gtk::Button = test_widget(dialog.upcast_ref(), &|widget| {
+            widget
+                .clone()
+                .downcast::<gtk::Button>()
+                .is_ok_and(|button| button.label().as_deref() == Some("Cancel"))
+        })
+        .unwrap()
+        .downcast()
+        .unwrap();
+        cancel.emit_clicked();
+        assert!(ui.trash_dialog.borrow().is_none());
+        assert!(
+            !ui.desktop_busy.get(),
+            "Cancel must not start the trash command"
+        );
+        println!(
+            "Desktop controls UI passed: all eleven commands searchable, live speaker/microphone/Wi-Fi/Bluetooth/DND/theme status, modal Trash confirmation and safe cancellation"
+        );
+        ui.window.application().unwrap().quit();
+        glib::ControlFlow::Break
+    });
+}
+fn smoke_screen_tools(ui: Rc<Ui>) {
+    glib::timeout_add_local_once(Duration::from_millis(500), move || {
+        for query in ["measure", "ruler", "screen measurement", "mesurment"] {
+            ui.search.set_text(query);
+            assert!(
+                ui.visible
+                    .borrow()
+                    .iter()
+                    .any(|i| matches!(i.action, Action::MeasureScreen)),
+                "Measurement search: {query}"
+            );
+        }
+        ui.measuring_screen.set(true);
+        ui.window.set_visible(false);
+        let image =
+            gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, false, 8, 1600, 900)
+                .unwrap();
+        image.fill(0x303946ff);
+        ui.finish_measurement(Ok(Some(image)));
+        let ruler = ui.measurement_window.borrow().as_ref().unwrap().clone();
+        glib::timeout_add_local_once(Duration::from_millis(700), move || {
+            assert!(ruler.window.is_fullscreen());
+            let w = ruler.area.width() as f64;
+            let h = ruler.area.height() as f64;
+            let scale = (w / 1600.).min(h / 900.);
+            let x = (w - 1600. * scale) / 2. + 100. * scale;
+            let y = (h - 900. * scale) / 2. + 250. * scale;
+            ruler.drag.emit_by_name::<()>("drag-begin", &[&x, &y]);
+            ruler
+                .drag
+                .emit_by_name::<()>("drag-update", &[&(300. * scale), &(400. * scale)]);
+            ruler
+                .drag
+                .emit_by_name::<()>("drag-end", &[&(300. * scale), &(400. * scale)]);
+            assert_eq!(ruler.readout.text(), "300 × 400 px · distance 500.0 px");
+            assert!(ruler.copy.is_sensitive());
+            let paint = gtk::WidgetPaintable::new(Some(&ruler.window));
+            let snapshot = gtk::Snapshot::new();
+            paint.snapshot(&snapshot, w, h);
+            if let Some(node) = snapshot.to_node() {
+                ruler
+                    .window
+                    .renderer()
+                    .unwrap()
+                    .render_texture(&node, None)
+                    .save_to_png("/tmp/spotlight-measure-preview.png")
+                    .unwrap();
+            }
+            ruler.copy.emit_clicked();
+            ui.window.clipboard().read_text_async(None::<&gio::Cancellable>, move |result| {
+                assert_eq!(result.unwrap().as_deref(), Some("300 × 400 px · distance 500.0 px"));
+                ruler.window.close();
+                assert!(!ui.measuring_screen.get());
+                assert!(ui.measurement_window.borrow().is_none());
+                assert!(ui.window.is_visible());
+                ui.finish_measurement(Ok(None));
+                assert!(ui.notice.text().contains("cancelled"));
+                println!("Measurement UI passed: search, fullscreen, scaled drag, width/height/distance, real clipboard, close and cancellation");
+                for query in ["caffeinate", "caffinate", "keep awake"] {
+                    ui.search.set_text(query);
+                    assert!(ui.visible.borrow().iter().any(|i| matches!(i.action, Action::Caffeinate)), "Caffeinate search: {query}");
+                }
+                ui.toggle_caffeinate();
+                assert!(ui.caffeinate.borrow().is_some(), "{}", ui.notice.text());
+                ui.window.set_visible(false);
+                // PowerDevil deliberately waits five seconds before enforcing an inhibition.
+                glib::timeout_add_local_once(Duration::from_millis(6000), move || {
+                    let bus = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>).unwrap();
+                    let check = || {
+                        bus.call_sync(Some("org.kde.Solid.PowerManagement"),
+                            "/org/kde/Solid/PowerManagement/PolicyAgent", "org.kde.Solid.PowerManagement.PolicyAgent",
+                            "ListInhibitions", None, None, gio::DBusCallFlags::NONE, 3000, None::<&gio::Cancellable>)
+                            .unwrap().get::<(std::collections::HashMap<String, String>,)>().unwrap().0
+                            .values().any(|reason| reason.contains("Spotlight Caffeinate"))
+                    };
+                    assert!(check(), "KDE must have a real active Caffeinate inhibition while the launcher is hidden");
+                    for policy in [1u32, 4u32] {
+                        let result = bus.call_sync(Some("org.kde.Solid.PowerManagement"),
+                            "/org/kde/Solid/PowerManagement/PolicyAgent", "org.kde.Solid.PowerManagement.PolicyAgent",
+                            "HasInhibition", Some(&(policy,).to_variant()), None, gio::DBusCallFlags::NONE, 3000, None::<&gio::Cancellable>).unwrap();
+                        assert!(result.get::<(bool,)>().unwrap().0, "Sleep and screen power saving must both be inhibited");
+                    }
+                    ui.toggle_caffeinate();
+                    assert!(ui.caffeinate.borrow().is_none(), "{}", ui.notice.text());
+                    glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                        let result = bus.call_sync(Some("org.kde.Solid.PowerManagement"),
+                            "/org/kde/Solid/PowerManagement/PolicyAgent", "org.kde.Solid.PowerManagement.PolicyAgent",
+                            "ListInhibitions", None, None, gio::DBusCallFlags::NONE, 3000, None::<&gio::Cancellable>).unwrap();
+                        let entries = result.get::<(std::collections::HashMap<String, String>,)>().unwrap().0;
+                        assert!(!entries.values().any(|reason| reason.contains("Spotlight Caffeinate")), "KDE power saving must be restored");
+                        println!("Caffeinate UI passed: search, real KDE power inhibition while hidden, toggle off, released inhibition");
+                        ui.window.application().unwrap().quit();
+                    });
+                });
+            });
+        });
+    });
+}
+fn smoke_measure_live(ui: Rc<Ui>) {
+    ui.measure_screen();
+    let started = std::time::Instant::now();
+    glib::timeout_add_local(Duration::from_millis(300), move || {
+        if let Some(ruler) = ui.measurement_window.borrow().as_ref().cloned() {
+            if ruler.area.width() == 0 {
+                return glib::ControlFlow::Continue;
+            }
+            println!(
+                "Live screenshot portal passed: fullscreen ruler is {} × {}",
+                ruler.area.width(),
+                ruler.area.height()
+            );
+            ruler
+                .drag
+                .emit_by_name::<()>("drag-begin", &[&320f64, &360f64]);
+            ruler
+                .drag
+                .emit_by_name::<()>("drag-end", &[&600f64, &400f64]);
+            let weak = Rc::downgrade(&ui);
+            glib::timeout_add_local_once(Duration::from_millis(700), move || {
+                let paint = gtk::WidgetPaintable::new(Some(&ruler.window));
+                let snapshot = gtk::Snapshot::new();
+                paint.snapshot(
+                    &snapshot,
+                    ruler.window.width() as f64,
+                    ruler.window.height() as f64,
+                );
+                if let Some(node) = snapshot.to_node() {
+                    ruler
+                        .window
+                        .renderer()
+                        .unwrap()
+                        .render_texture(&node, None)
+                        .save_to_png("/tmp/spotlight-measure-live.png")
+                        .unwrap();
+                }
+                ruler.window.close();
+                if let Some(ui) = weak.upgrade() {
+                    ui.window.application().unwrap().quit();
+                }
+            });
+            return glib::ControlFlow::Break;
+        }
+        assert!(
+            ui.measuring_screen.get(),
+            "Live screen capture failed: {}",
+            ui.notice.text()
+        );
+        assert!(
+            started.elapsed().as_secs() < 45,
+            "Screen capture timed out waiting for the desktop portal"
+        );
+        glib::ControlFlow::Continue
     });
 }
 fn smoke_colors(ui: Rc<Ui>) {
@@ -3587,13 +6589,13 @@ fn smoke(ui: Rc<Ui>) {
         assert!(
             ui.section
                 .text()
-                .contains(&emoji::catalog().len().to_string())
+                .contains(&ui.emoji_items().len().to_string())
         );
         ui.list.select_row(ui.list.row_at_index(60).as_ref());
         ui.activate();
         assert_eq!(
             ui.visible.borrow().len(),
-            emoji::catalog().len(),
+            ui.emoji_items().len(),
             "Everyday selection fully browsable"
         );
         for (query, expected) in [
@@ -3625,10 +6627,29 @@ fn smoke(ui: Rc<Ui>) {
             "Search resets browsing limit"
         );
         ui.page(Page::Windows);
-        assert_eq!(ui.visible.borrow().len(), 12, "Window actions available");
+        assert_eq!(
+            ui.visible.borrow().len(),
+            13,
+            "Window actions and shortcut customization available"
+        );
+        assert!(
+            ui.window_shortcuts.is_visible(),
+            "Shortcut button visible in Window Manager"
+        );
+        ui.search.set_text("customize shortcuts");
+        assert_eq!(ui.visible.borrow()[0].id, "window-shortcuts");
+        assert!(
+            matches!(&ui.visible.borrow()[0].action, Action::System(args)
+            if args == &["kcmshell6", "--args", "kwin", "kcm_keys"]),
+            "Shortcut editor opens with KWin selected"
+        );
         ui.search.set_text("left half");
         assert_eq!(ui.visible.borrow()[0].title, "Left Half");
         ui.page(Page::Files);
+        assert!(
+            !ui.window_shortcuts.is_visible(),
+            "Shortcut button belongs to Window Manager"
+        );
         ui.page(Page::Clipboard);
         let checked = Rc::clone(&ui);
         glib::timeout_add_local_once(Duration::from_millis(1000), move || {
@@ -3822,6 +6843,7 @@ fn main() -> glib::ExitCode {
     show.connect_activate(move |_, _| {
         if let Some(ui) = state.borrow().as_ref() {
             ui.page(Page::Root);
+            ui.load_desktop();
             ui.window.present();
             ui.search.grab_focus();
         }
@@ -3868,10 +6890,17 @@ fn main() -> glib::ExitCode {
     app.add_action(&diagnostics);
     app.connect_activate(move |app| {
         if let Some(ui) = ui.borrow().as_ref() {
+            if ui.measuring_screen.get() {
+                if let Some(ruler) = ui.measurement_window.borrow().as_ref() {
+                    ruler.window.present();
+                }
+                return;
+            }
             if ui.window.is_visible() {
                 ui.window.set_visible(false);
             } else {
                 ui.page(Page::Root);
+                ui.load_desktop();
                 ui.window.present();
                 ui.search.grab_focus();
             }
@@ -3879,7 +6908,19 @@ fn main() -> glib::ExitCode {
         }
         let built = build(app);
         if test {
-            if std::env::args().any(|a| a == "--colors-smoke-test") {
+            if std::env::args().any(|a| a == "--plus-smoke-test") {
+                smoke_plus(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--search-tools-smoke-test") {
+                smoke_search_tools(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--boosters-smoke-test") {
+                smoke_boosters(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--desktop-controls-smoke-test") {
+                smoke_desktop_commands(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--screen-tools-smoke-test") {
+                smoke_screen_tools(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--measure-live-smoke-test") {
+                smoke_measure_live(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--colors-smoke-test") {
                 smoke_colors(Rc::clone(&built));
             } else if std::env::args().any(|a| a == "--fonts-smoke-test") {
                 smoke_fonts(Rc::clone(&built));

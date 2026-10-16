@@ -4,6 +4,8 @@
 # Runtime data and private local configuration (never distribute)
 data.json
 data.tmp
+desktop-themes.json
+desktop-themes.tmp
 /quick-notes/
 /scripts/
 /.local/
@@ -21,5 +23,6 @@ data.tmp
 
 # Editor and operating-system files
 *.swp
+__pycache__/
 *~
 .DS_Store

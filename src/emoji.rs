@@ -187,6 +187,73 @@ pub fn catalog() -> &'static [Emoji] {
     })
 }
 
+pub fn base(symbol: &str) -> String {
+    symbol
+        .chars()
+        .filter(|c| !('\u{1f3fb}'..='\u{1f3ff}').contains(c) && *c != '\u{fe0f}')
+        .collect()
+}
+pub fn tone(symbol: &str) -> Option<u8> {
+    symbol
+        .chars()
+        .find(|c| ('\u{1f3fb}'..='\u{1f3ff}').contains(c))
+        .map(|c| (c as u32 - 0x1f3fa) as u8)
+}
+pub fn variant(symbol: &str, preferred: Option<u8>) -> String {
+    let Some(preferred) = preferred.filter(|n| (1..=5).contains(n)) else {
+        return symbol.into();
+    };
+    if tone(symbol).is_some() {
+        return symbol.into();
+    }
+    static VARIANTS: OnceLock<Vec<String>> = OnceLock::new();
+    let variants = VARIANTS.get_or_init(|| {
+        include_str!("../assets/emoji-test.txt")
+            .lines()
+            .filter_map(|line| {
+                let (sequence, description) = line.split_once('#')?;
+                if sequence.split_once(';')?.1.trim() != "fully-qualified" {
+                    return None;
+                }
+                let glyph = description.split_whitespace().next()?;
+                tone(glyph).map(|_| glyph.to_owned())
+            })
+            .collect()
+    });
+    let wanted = base(symbol);
+    variants
+        .iter()
+        .find(|glyph| {
+            base(glyph) == wanted
+                && glyph
+                    .chars()
+                    .filter(|c| ('\u{1f3fb}'..='\u{1f3ff}').contains(c))
+                    .all(|c| c as u32 == 0x1f3fa + u32::from(preferred))
+        })
+        .cloned()
+        .unwrap_or_else(|| symbol.into())
+}
+pub fn kaomoji() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("¯\\_(ツ)_/¯", "shrug whatever"),
+        ("(╯°□°)╯︵ ┻━┻", "table flip angry"),
+        ("┬─┬ノ( º _ ºノ)", "table unflip calm"),
+        ("(づ｡◕‿‿◕｡)づ", "hug love"),
+        ("(ಠ_ಠ)", "disapproval stare"),
+        ("(ง'̀-'́)ง", "fight determined"),
+        ("(｡♥‿♥｡)", "love happy"),
+        ("(ᵔᴥᵔ)", "bear cute"),
+        ("(=^･ω･^=)", "cat cute"),
+        ("(✿◠‿◠)", "smile happy"),
+        ("(ಥ﹏ಥ)", "cry sad tears"),
+        ("(－‸ლ)", "facepalm"),
+        ("ᕕ( ᐛ )ᕗ", "run excited"),
+        ("ヽ(•‿•)ノ", "cheer celebrate"),
+        ("(☞ﾟヮﾟ)☞", "point finger guns"),
+        ("m(_ _)m", "bow sorry apologize"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +292,15 @@ mod tests {
                 .iter()
                 .any(|e| e.symbol == "🐧" && e.keywords.contains("linux"))
         );
+    }
+    #[test]
+    fn validated_tones_and_zwj_sequences() {
+        assert_eq!(variant("👩‍💻", Some(3)), "👩🏽‍💻");
+        assert_eq!(variant("👋", Some(5)), "👋🏿");
+        assert_eq!(variant("❤️", Some(2)), "❤️");
+        assert_eq!(variant("👍🏻", Some(5)), "👍🏻");
+        assert_eq!(tone("👩🏽‍💻"), Some(3));
+        assert_eq!(base("👩🏽‍💻"), base("👩‍💻"));
+        assert!(kaomoji().iter().any(|(_, name)| name.contains("shrug")));
     }
 }
