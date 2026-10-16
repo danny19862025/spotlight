@@ -2,7 +2,7 @@
 
 Keep legacy executable scripts in `$XDG_DATA_HOME/spotlight/scripts` (normally `~/.local/share/spotlight/scripts`). They continue to run as before. A manifest extension lives in a subdirectory with a `manifest.json`, or uses a `.json` manifest directly in the scripts directory.
 
-Extensions have your normal user privileges. Install scripts you trust. Spotlight does not sandbox them. Opening Script Commands only discovers manifests; it does not run them.
+Native script extensions (`runtime: "process"`, the default) have your normal user privileges. Install scripts you trust. For sandboxed plugins, use `runtime: "wasm"` and a `module` instead of `command`: see [WASM plugins and SDKs](WASM.md). WASM plugins live under `$XDG_DATA_HOME/spotlight/plugins`; this directory rejects native process manifests. Opening Script Commands only discovers manifests; it does not run them.
 
 ```json
 {
@@ -20,13 +20,13 @@ Extensions have your normal user privileges. Install scripts you trust. Spotligh
 }
 ```
 
-The [manifest schema](extension.schema.json) describes the format. `command` is an argument vector, never a shell command string. Relative executable paths resolve from the manifest directory, which is also the process working directory. Literal argument values are appended to `command`; there is no shell interpolation. Interpreter-based extensions can use any installed runtime. The core launcher needs no Python runtime.
+The [manifest schema](extension.schema.json) describes the format. For process extensions, `command` is an argument vector, never a shell command string. Relative executable paths resolve from the manifest directory, which is also the process working directory. Literal argument values are appended to `command`; there is no shell interpolation. Interpreter-based extensions can use any installed runtime. The core launcher needs no Python runtime.
 
 `icon` can be a theme icon name, a short emoji, or a relative image file inside the extension directory (at most 256 KiB). Result icons use the same rules. Paths that resolve outside the directory are ignored.
 
 `mode: "command"` runs only after Enter or Run Extension. Choosing it from Script Commands or main search opens an argument form when arguments are declared. You can also type `ext greet "two words"` and press Enter on Run. Quotes and backslashes group literal arguments; `$()` and variables are not expanded. `default` fills the form, and `required` rejects empty values.
 
-`mode: "search"` runs after a 350 ms typing delay when you explicitly type `ext <id> <query>`. The whole query is passed as one argument and in `SPOTLIGHT_QUERY`. Every extension receives `SPOTLIGHT_EXTENSION_API=1`. Search-mode manifests normally omit `args`. Selecting a search extension puts its `ext <id>` prefix in the search field.
+`mode: "search"` runs after a 350 ms typing delay when you explicitly type `ext <id> <query>` or `plugin <id> <query>`. The whole query is passed as one argument and in `SPOTLIGHT_QUERY`. Every extension receives `SPOTLIGHT_EXTENSION_API=1`. Search-mode manifests normally omit `args`. Selecting a search extension puts its `ext <id>` prefix in the search field.
 
 Write one UTF-8 JSON object per line to stdout, flushing each update. Results appear while the process is still running:
 

@@ -9,7 +9,11 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -20,6 +24,20 @@ pub enum Query {
 }
 impl Query {
     pub fn parse(text: &str) -> Option<Self> {
+        if let Some((head, rest)) = text.split_once(char::is_whitespace)
+            && matches!(head, "rg" | "content")
+        {
+            return Some(Self::Content {
+                scope: "~".into(),
+                text: rest.trim().into(),
+            });
+        }
+        if matches!(text, "rg" | "content") {
+            return Some(Self::Content {
+                scope: "~".into(),
+                text: String::new(),
+            });
+        }
         if let Some(rest) = text.strip_prefix("in:") {
             let rest = rest.trim();
             let (scope, text) = if let Some(quoted) = rest.strip_prefix('"') {
@@ -99,7 +117,7 @@ pub fn fetch(query: &Query) -> Result<Vec<Entry>, String> {
             if scope.is_empty() || text.is_empty() {
                 return Ok(vec![boosters::hint(
                     "Search inside files",
-                    "Type in: notes rust, in: ~/Projects TODO, or in: \"Documents/My Notes\" phrase",
+                    "Type rg rust to search home, in: notes rust, or in: \"Documents/My Notes\" phrase",
                 )]);
             }
             if text.len() > 512 {
@@ -149,6 +167,38 @@ fn roots(scope: &str) -> Result<Vec<PathBuf>, String> {
     Ok(vec![path])
 }
 fn content(roots: &[PathBuf], text: &str) -> Result<Vec<Entry>, String> {
+    content_stream(roots, text, &AtomicBool::new(false), &mut |_| {})
+}
+pub enum Update {
+    Match(Entry),
+    Done(Result<Vec<Entry>, String>),
+}
+pub fn stream(query: &Query, cancel: Arc<AtomicBool>, updates: mpsc::Sender<Update>) {
+    let result = (|| {
+        let Query::Content { scope, text } = query else {
+            return fetch(query);
+        };
+        if scope.is_empty() || text.is_empty() {
+            return fetch(query);
+        }
+        if text.len() > 512 || text.contains('\0') {
+            return Err("Use search text up to 512 bytes without NUL".into());
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Search cancelled".into());
+        }
+        content_stream(&roots(scope)?, text, &cancel, &mut |row| {
+            let _ = updates.send(Update::Match(row));
+        })
+    })();
+    let _ = updates.send(Update::Done(result));
+}
+fn content_stream(
+    roots: &[PathBuf],
+    text: &str,
+    cancel: &AtomicBool,
+    on_match: &mut impl FnMut(Entry),
+) -> Result<Vec<Entry>, String> {
     let mut child = Command::new("rg")
         .args([
             "--no-config",
@@ -198,10 +248,11 @@ fn content(roots: &[PathBuf], text: &str) -> Result<Vec<Entry>, String> {
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut rows = Vec::new();
     let mut limited = false;
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !cancel.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(40)) {
             Ok(v) => {
                 if let Some(row) = content_row(&v) {
+                    on_match(row.clone());
                     rows.push(row);
                 }
                 if rows.len() >= 100 {
@@ -218,10 +269,13 @@ fn content(roots: &[PathBuf], text: &str) -> Result<Vec<Entry>, String> {
     }
     // Closing the receiver also releases a bounded reader if the result cap was hit.
     drop(rx);
-    if limited {
+    if limited || cancel.load(Ordering::Relaxed) {
         let _ = child.kill();
     }
     let status = child.wait().map_err(|e| e.to_string())?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Search cancelled".into());
+    }
     if !limited && !status.success() && status.code() != Some(1) {
         return Err("ripgrep could not search this folder · check read permissions".into());
     }
@@ -499,6 +553,26 @@ mod tests {
         let rows = content(std::slice::from_ref(&root), "Rust async").unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].title.starts_with("note.md:2"));
+        let cancelled = AtomicBool::new(false);
+        let mut streamed = 0;
+        let result = content_stream(
+            std::slice::from_ref(&root),
+            "Rust async",
+            &cancelled,
+            &mut |_| {
+                streamed += 1;
+                cancelled.store(true, Ordering::Relaxed);
+            },
+        );
+        assert_eq!(streamed, 1);
+        assert_eq!(result.unwrap_err(), "Search cancelled");
+        assert_eq!(
+            Query::parse("rg Rust async"),
+            Some(Query::Content {
+                scope: "~".into(),
+                text: "Rust async".into()
+            })
+        );
         assert_eq!(
             content(std::slice::from_ref(&root), "--not-an-option").unwrap()[0].title,
             "No content matches"

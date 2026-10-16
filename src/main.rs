@@ -17,6 +17,7 @@ mod search;
 mod shortcut;
 mod snippets;
 mod texttools;
+mod wasmplugins;
 mod windowing;
 use core::{Store, TextItem};
 use gtk::{gdk, gio, glib, prelude::*};
@@ -52,7 +53,7 @@ impl Page {
             Self::Snippets => "Snippets",
             Self::Links => "Quicklinks",
             Self::Notes => "Notes",
-            Self::Scripts => "Script commands",
+            Self::Scripts => "Plugins & script commands",
             Self::Emoji => "Everyday emoji & symbols",
             Self::Fonts => "Installed Fonts",
             Self::Colors => "Color Formats",
@@ -180,6 +181,7 @@ struct Ui {
     extension_errors: RefCell<Vec<String>>,
     extensions_loading: Cell<bool>,
     extension_session: RefCell<Option<ExtensionSession>>,
+    content_session: RefCell<Option<ContentSession>>,
     result_limit: Cell<usize>,
     currency: RefCell<currency::State>,
     booster_cache: RefCell<
@@ -215,6 +217,18 @@ struct Ui {
     alarm_window: RefCell<Option<gtk::Window>>,
     alarm_repeat: RefCell<Option<glib::SourceId>>,
     alarm_label: RefCell<Option<gtk::Label>>,
+}
+struct ContentSession {
+    query: search::Query,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    rows: Vec<boosters::Entry>,
+    done: bool,
+}
+impl Drop for ContentSession {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 struct ExtensionSession {
     key: String,
@@ -1847,9 +1861,22 @@ impl Ui {
                 let mut row = item(
                     &format!("extension:{}", m.id),
                     &m.name,
-                    &format!("{} · ext {}", m.description, m.id),
+                    &format!(
+                        "{} · ext {} · {}",
+                        m.description,
+                        m.id,
+                        if m.runtime == extensions::Runtime::Wasm {
+                            "Sandboxed WASM"
+                        } else {
+                            "Script · full user access"
+                        }
+                    ),
                     "utilities-terminal-symbolic",
-                    "Extension",
+                    if m.runtime == extensions::Runtime::Wasm {
+                        "WASM"
+                    } else {
+                        "Script"
+                    },
                     Action::Extension(m.clone()),
                 );
                 Self::extension_icon(m, &m.icon, &mut row);
@@ -1987,6 +2014,7 @@ impl Ui {
                     return;
                 }
                 let (tx, rx) = mpsc::channel();
+                let session_cancel = cancel.clone();
                 std::thread::spawn(move || extensions::run(manifest, args, cancel, tx));
                 let weak = Rc::downgrade(&ui);
                 glib::timeout_add_local(Duration::from_millis(60), move || {
@@ -2000,7 +2028,9 @@ impl Ui {
                     let (done, changed) = {
                         let mut changed = false;
                         let mut guard = ui.extension_session.borrow_mut();
-                        let Some(session) = guard.as_mut().filter(|s| s.key == key) else {
+                        let Some(session) = guard.as_mut().filter(|s| {
+                            s.key == key && std::sync::Arc::ptr_eq(&s.cancel, &session_cancel)
+                        }) else {
                             return glib::ControlFlow::Break;
                         };
                         loop {
@@ -2072,7 +2102,7 @@ impl Ui {
                 } else {
                     "Choose an installed extension"
                 },
-                "Type ext <id> <arguments> · browse Script Commands for manifests and legacy scripts",
+                "Type plugin <id> <arguments> · Script Commands lists WASM plugins and native scripts",
                 "utilities-terminal-symbolic",
                 "Info",
                 Action::Page(Page::Scripts),
@@ -2137,7 +2167,11 @@ impl Ui {
                     &entry.title,
                     &entry.subtitle,
                     "utilities-terminal-symbolic",
-                    "Extension",
+                    if manifest.runtime == extensions::Runtime::Wasm {
+                        "WASM"
+                    } else {
+                        "Script"
+                    },
                     action,
                 );
                 Self::extension_icon(
@@ -2488,7 +2522,25 @@ impl Ui {
                 "content-search",
                 "Search File Contents",
                 "Use ripgrep · in: notes rust or in: ~/Projects phrase",
-                "in: notes ",
+                "rg ",
+            ),
+            (
+                "windows",
+                "Open Windows",
+                "Search open windows by title, app, and desktop",
+                "window ",
+            ),
+            (
+                "desktops",
+                "Virtual Desktops",
+                "Switch virtual desktops by name or number",
+                "desktop ",
+            ),
+            (
+                "switcher",
+                "Window & Desktop Switcher",
+                "Find windows and virtual desktops together",
+                "switch ",
             ),
             (
                 "contacts",
@@ -2626,7 +2678,7 @@ impl Ui {
             (
                 Page::Scripts,
                 "Script Commands",
-                "Run your own executable scripts",
+                "Plugins · sandboxed WASM and executable scripts",
                 "utilities-terminal-symbolic",
             ),
             (
@@ -2805,71 +2857,187 @@ impl Ui {
             Action::Noop,
         )
     }
-    fn booster_items(self: &Rc<Self>, query: boosters::Query) -> Vec<Item> {
-        let cached = self
-            .booster_cache
-            .borrow()
-            .get(&query)
-            .filter(|(time, result)| {
-                time.elapsed()
-                    < if result.is_err() {
-                        Duration::from_secs(30)
-                    } else {
-                        query.ttl()
-                    }
-            })
-            .map(|(_, result)| result.clone());
-        let entries = if let Some(result) = cached {
-            result.unwrap_or_else(|error| {
-                vec![boosters::hint(
-                    error,
-                    "Check the command or required tool · Ctrl+R retries",
-                )]
-            })
-        } else {
-            if self.booster_pending.borrow_mut().insert(query.clone()) {
-                let weak = Rc::downgrade(self);
-                let request = query.clone();
-                glib::timeout_add_local_once(Duration::from_millis(350), move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    if *ui.page.borrow() != Page::Root
-                        || boosters::Query::parse(&ui.search.text()).as_ref() != Some(&request)
-                    {
-                        ui.booster_pending.borrow_mut().remove(&request);
-                        return;
-                    }
-                    let (tx, rx) = mpsc::channel();
-                    let work = request.clone();
-                    std::thread::spawn(move || {
-                        let _ = tx.send(boosters::fetch(&work));
-                    });
-                    let weak = Rc::downgrade(&ui);
-                    glib::timeout_add_local(Duration::from_millis(60), move || {
-                        let Some(ui) = weak.upgrade() else {
+    fn cancel_content(&self) {
+        if let Some(session) = self.content_session.borrow_mut().take() {
+            self.booster_pending
+                .borrow_mut()
+                .remove(&boosters::Query::Search(session.query.clone()));
+        }
+    }
+    fn content_entries(self: &Rc<Self>, query: search::Query) -> Vec<boosters::Entry> {
+        if self.content_session.borrow().is_none() {
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            *self.content_session.borrow_mut() = Some(ContentSession {
+                query: query.clone(),
+                cancel: cancel.clone(),
+                rows: Vec::new(),
+                done: false,
+            });
+            self.booster_pending
+                .borrow_mut()
+                .insert(boosters::Query::Search(query.clone()));
+            let weak = Rc::downgrade(self);
+            glib::timeout_add_local_once(Duration::from_millis(120), move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) || !ui.window.is_visible() {
+                    return;
+                }
+                let (tx, rx) = mpsc::channel();
+                let worker_cancel = cancel.clone();
+                std::thread::spawn(move || search::stream(&query, worker_cancel, tx));
+                let weak = Rc::downgrade(&ui);
+                glib::timeout_add_local(Duration::from_millis(40), move || {
+                    let Some(ui) = weak.upgrade() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    let selected = ui
+                        .selected()
+                        .filter(|i| matches!(i.action, Action::Preview { .. }))
+                        .map(|i| i.id);
+                    let (done, changed, query) = {
+                        let mut guard = ui.content_session.borrow_mut();
+                        let Some(session) = guard
+                            .as_mut()
+                            .filter(|s| std::sync::Arc::ptr_eq(&s.cancel, &cancel))
+                        else {
                             return glib::ControlFlow::Break;
                         };
-                        let result = match rx.try_recv() {
-                            Ok(result) => result,
-                            Err(mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                            Err(_) => Err("Command lookup interrupted".into()),
-                        };
-                        ui.booster_pending.borrow_mut().remove(&request);
-                        let mut cache = ui.booster_cache.borrow_mut();
-                        if cache.len() >= 48 {
-                            cache.clear();
+                        let mut changed = false;
+                        loop {
+                            match rx.try_recv() {
+                                Ok(search::Update::Match(row)) => {
+                                    session.rows.push(row);
+                                    changed = true;
+                                }
+                                Ok(search::Update::Done(result)) => {
+                                    session.rows = result.unwrap_or_else(|error| {
+                                        vec![boosters::hint(
+                                            error,
+                                            "Ctrl+R retries · use rg phrase or in: ~/folder phrase",
+                                        )]
+                                    });
+                                    session.done = true;
+                                    changed = true;
+                                    break;
+                                }
+                                Err(mpsc::TryRecvError::Empty) => break,
+                                Err(_) => {
+                                    session.done = true;
+                                    break;
+                                }
+                            }
                         }
-                        cache.insert(request.clone(), (std::time::Instant::now(), result));
-                        drop(cache);
-                        if *ui.page.borrow() == Page::Root
-                            && boosters::Query::parse(&ui.search.text()).as_ref() == Some(&request)
+                        (session.done, changed, session.query.clone())
+                    };
+                    if done {
+                        ui.booster_pending
+                            .borrow_mut()
+                            .remove(&boosters::Query::Search(query));
+                    }
+                    if changed {
+                        ui.refresh();
+                        if let Some(id) = selected
+                            && let Some(index) = ui.visible.borrow().iter().position(|i| i.id == id)
                         {
-                            ui.refresh();
+                            ui.list
+                                .select_row(ui.list.row_at_index(index as i32).as_ref());
                         }
+                    }
+                    if done {
                         glib::ControlFlow::Break
-                    });
+                    } else {
+                        glib::ControlFlow::Continue
+                    }
                 });
+            });
+        }
+        let session = self.content_session.borrow();
+        let session = session.as_ref().unwrap();
+        let mut rows = session.rows.clone();
+        if !session.done {
+            rows.push(boosters::hint(
+                "Searching file contents…",
+                "ripgrep · results arrive as files match · change the query to cancel",
+            ));
+        }
+        rows
+    }
+    fn booster_items(self: &Rc<Self>, query: boosters::Query) -> Vec<Item> {
+        let entries = if let boosters::Query::Search(content @ search::Query::Content { .. }) =
+            &query
+        {
+            self.content_entries(content.clone())
+        } else {
+            let cached = self
+                .booster_cache
+                .borrow()
+                .get(&query)
+                .filter(|(time, result)| {
+                    time.elapsed()
+                        < if result.is_err() {
+                            Duration::from_secs(30)
+                        } else {
+                            query.ttl()
+                        }
+                })
+                .map(|(_, result)| result.clone());
+            if let Some(result) = cached {
+                result.unwrap_or_else(|error| {
+                    vec![boosters::hint(
+                        error,
+                        "Check the command or required tool · Ctrl+R retries",
+                    )]
+                })
+            } else {
+                if self.booster_pending.borrow_mut().insert(query.clone()) {
+                    let weak = Rc::downgrade(self);
+                    let request = query.clone();
+                    glib::timeout_add_local_once(Duration::from_millis(350), move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        if *ui.page.borrow() != Page::Root
+                            || boosters::Query::parse(&ui.search.text()).as_ref() != Some(&request)
+                        {
+                            ui.booster_pending.borrow_mut().remove(&request);
+                            return;
+                        }
+                        let (tx, rx) = mpsc::channel();
+                        let work = request.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(boosters::fetch(&work));
+                        });
+                        let weak = Rc::downgrade(&ui);
+                        glib::timeout_add_local(Duration::from_millis(60), move || {
+                            let Some(ui) = weak.upgrade() else {
+                                return glib::ControlFlow::Break;
+                            };
+                            let result = match rx.try_recv() {
+                                Ok(result) => result,
+                                Err(mpsc::TryRecvError::Empty) => {
+                                    return glib::ControlFlow::Continue;
+                                }
+                                Err(_) => Err("Command lookup interrupted".into()),
+                            };
+                            ui.booster_pending.borrow_mut().remove(&request);
+                            let mut cache = ui.booster_cache.borrow_mut();
+                            if cache.len() >= 48 {
+                                cache.clear();
+                            }
+                            cache.insert(request.clone(), (std::time::Instant::now(), result));
+                            drop(cache);
+                            if *ui.page.borrow() == Page::Root
+                                && boosters::Query::parse(&ui.search.text()).as_ref()
+                                    == Some(&request)
+                            {
+                                ui.refresh();
+                            }
+                            glib::ControlFlow::Break
+                        });
+                    });
+                }
+                vec![boosters::hint("Loading…", "Searching in the background")]
             }
-            vec![boosters::hint("Loading…", "Searching in the background")]
         };
         entries
             .into_iter()
@@ -2901,7 +3069,14 @@ impl Ui {
                     &e.title,
                     &e.detail,
                     match &query {
+                        boosters::Query::Search(search::Query::Content { .. }) => {
+                            "system-search-symbolic"
+                        }
                         boosters::Query::Search(_) => "document-open-recent-symbolic",
+                        boosters::Query::Windows(_) => "focus-windows-symbolic",
+                        boosters::Query::Desktops(_) | boosters::Query::Switcher(_) => {
+                            "view-grid-symbolic"
+                        }
                         boosters::Query::Pim(pim::Kind::Contacts, _) => "avatar-default-symbolic",
                         boosters::Query::Pim(pim::Kind::Calendar, _) => {
                             "x-office-calendar-symbolic"
@@ -2922,7 +3097,10 @@ impl Ui {
             return;
         }
         self.error("Running command…");
-        let switching = matches!(operation, boosters::Operation::FocusWindow(_));
+        let switching = matches!(
+            operation,
+            boosters::Operation::FocusWindow(_) | boosters::Operation::SwitchDesktop(_)
+        );
         if switching {
             self.window.set_visible(false);
         }
@@ -3093,6 +3271,13 @@ impl Ui {
         let query = self.search.text().to_string();
         let q = query.trim();
         let page = *self.page.borrow();
+        let explicit_lookup = page == Page::Root
+            && (boosters::Query::parse(q).is_some() || extensions::query(q).is_some());
+        if self.content_session.borrow().as_ref().is_some_and(|s| {
+            page != Page::Root || search::Query::parse(q).as_ref() != Some(&s.query)
+        }) {
+            self.cancel_content();
+        }
         if self
             .extension_session
             .borrow()
@@ -3113,6 +3298,7 @@ impl Ui {
             }
         }
         let mut items = match page {
+            Page::Root if explicit_lookup => Vec::new(),
             Page::Root => self.root(),
             Page::Windows => window_items(),
             Page::Files => {
@@ -3209,7 +3395,7 @@ impl Ui {
             Page::Fonts => self.font_items(),
             Page::Colors => self.color_items(),
         };
-        if page == Page::Root && !q.is_empty() {
+        if page == Page::Root && !q.is_empty() && !explicit_lookup {
             items.extend(self.emoji_items());
             items.extend(self.file_items(q));
             items.extend(self.font_items());
@@ -3454,7 +3640,7 @@ impl Ui {
         }
         if results.is_empty() {
             self.section.set_text(if page == Page::Scripts {
-                "No scripts yet · add executable files in Settings → Scripts folder"
+                "No plugins or scripts yet · open their folders in Settings"
             } else {
                 "No results · try another search"
             });
@@ -4272,20 +4458,25 @@ impl Ui {
             status.set_text("Future notes will save locally; existing vault notes are kept");
             ui.refresh();
         });
-        let folder = gtk::Button::with_label("Open scripts folder");
-        let ui = Rc::clone(self);
-        folder.connect_clicked(move |_| {
-            let p = core::data_dir().join("scripts");
-            if let Err(e) = std::fs::create_dir_all(&p) {
-                ui.error(&e.to_string());
-                return;
-            }
-            let _ = gio::AppInfo::launch_default_for_uri(
-                &gio::File::for_path(p).uri(),
-                None::<&gio::AppLaunchContext>,
-            );
-        });
-        panel.append(&folder);
+        for (label, directory) in [
+            ("Open WASM plugins folder", "plugins"),
+            ("Open scripts folder", "scripts"),
+        ] {
+            let folder = gtk::Button::with_label(label);
+            let ui = Rc::clone(self);
+            folder.connect_clicked(move |_| {
+                let p = core::data_dir().join(directory);
+                if let Err(e) = std::fs::create_dir_all(&p) {
+                    ui.error(&e.to_string());
+                    return;
+                }
+                let _ = gio::AppInfo::launch_default_for_uri(
+                    &gio::File::for_path(p).uri(),
+                    None::<&gio::AppLaunchContext>,
+                );
+            });
+            panel.append(&folder);
+        }
         let refresh = gtk::Button::with_label("Refresh apps and file index");
         let ui = Rc::clone(self);
         refresh.connect_clicked(move |_| {
@@ -4730,6 +4921,7 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         extension_errors: RefCell::new(Vec::new()),
         extensions_loading: Cell::new(false),
         extension_session: RefCell::new(None),
+        content_session: RefCell::new(None),
         result_limit: Cell::new(60),
         currency: RefCell::new(currency::State::default()),
         booster_cache: RefCell::new(std::collections::HashMap::new()),
@@ -4818,6 +5010,10 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         if ctrl {
             match key {
                 gdk::Key::r | gdk::Key::R => {
+                    u.cancel_content();
+                    if *u.page.borrow() == Page::Scripts {
+                        u.load_extensions();
+                    }
                     if *u.page.borrow() == Page::Clipboard {
                         u.load_clipboard();
                     }
@@ -4885,6 +5081,7 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
             && let Some(ui) = weak.upgrade()
         {
             ui.extension_session.borrow_mut().take();
+            ui.cancel_content();
         }
     });
     ui.window.connect_close_request(|w| {
@@ -5174,6 +5371,198 @@ fn capture_test_window(window: &gtk::Window, path: &str) {
             .save_to_png(path)
             .unwrap();
     }
+}
+fn smoke_superpowers(ui: Rc<Ui>) {
+    assert_eq!(
+        std::env::var("SPOTLIGHT_SUPER_FIXTURES").as_deref(),
+        Ok("1")
+    );
+    assert!(core::data_dir().starts_with("/tmp"));
+    ui.search.set_editable(false);
+    let shield = gtk::EventControllerKey::new();
+    shield.set_propagation_phase(gtk::PropagationPhase::Capture);
+    shield.connect_key_pressed(|_, _, _, _| glib::Propagation::Stop);
+    ui.window.add_controller(shield);
+    ui.load_extensions();
+    let fixture_name = std::env::var("SPOTLIGHT_DESKTOP_FIXTURE_NAME").unwrap();
+    let fixture_id = std::env::var("SPOTLIGHT_DESKTOP_FIXTURE_ID").unwrap();
+    let original_id = std::env::var("SPOTLIGHT_DESKTOP_ORIGINAL_ID").unwrap();
+    let root = PathBuf::from(std::env::var_os("SPOTLIGHT_SUPER_ROOT").unwrap());
+    let mut phase = 0;
+    let started = std::time::Instant::now();
+    let mut phase_at = started;
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        assert!(
+            started.elapsed() < Duration::from_secs(35),
+            "Superpowers UI timed out at phase {phase}: {}",
+            ui.notice.text()
+        );
+        if phase_at.elapsed() < Duration::from_millis(180) || ui.extensions_loading.get() {
+            return glib::ControlFlow::Continue;
+        }
+        match phase {
+            0 => {
+                assert_eq!(ui.extensions.borrow().len(), 2);
+                assert!(
+                    ui.extensions
+                        .borrow()
+                        .iter()
+                        .all(|m| m.runtime == extensions::Runtime::Wasm)
+                );
+                ui.search.set_text("plugin wasm-text café ß");
+            }
+            1 => {
+                if !ui
+                    .extension_session
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|s| s.done)
+                {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| matches!(&i.action,Action::Copy(s) if s=="CAFÉ SS")),
+                    "Rust WASM plugin: {:?}",
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .map(|i| &i.title)
+                        .collect::<Vec<_>>()
+                );
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-wasm-preview.png");
+                ui.search.set_text("plugin wasm-loop cancel");
+            }
+            2 => {
+                let cancel = {
+                    let session = ui.extension_session.borrow();
+                    let Some(s) = session.as_ref().filter(|s| !s.items.is_empty()) else {
+                        return glib::ControlFlow::Continue;
+                    };
+                    // Fast machines may exhaust fuel before the next UI frame.
+                    assert!(
+                        !s.done || s.status.contains("fuel"),
+                        "Loop must still run or stop at its fuel bound: {}",
+                        s.status
+                    );
+                    assert_eq!(s.items[0].title, "WASM before loop");
+                    s.cancel.clone()
+                };
+                ui.search.set_text("in: Notes stream-fixture");
+                assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+            }
+            3 => {
+                let cancel = {
+                    let session = ui.content_session.borrow();
+                    let Some(s) = session.as_ref().filter(|s| !s.rows.is_empty()) else {
+                        return glib::ControlFlow::Continue;
+                    };
+                    assert!(!s.done, "First rg result arrives before the scan exits");
+                    s.cancel.clone()
+                };
+                assert!(
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| i.title.contains("stream-fixture"))
+                );
+                capture_test_window(
+                    ui.window.upcast_ref(),
+                    "/tmp/spotlight-content-stream-preview.png",
+                );
+                ui.search.set_text("rg new-pattern");
+                assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+            }
+            4 => {
+                if !ui.content_session.borrow().as_ref().is_some_and(|s| s.done) {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(
+                    !ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| i.title.contains("stream-fixture"))
+                );
+                assert!(!root.join("search-uncancelled").exists());
+                ui.search.set_text(&format!("desktop {fixture_name}"));
+            }
+            5 => {
+                if !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                let row = ui.visible.borrow()[0].clone();
+                assert!(
+                    matches!(&row.action,Action::Booster(boosters::Operation::SwitchDesktop(id)) if id==&fixture_id),
+                    "Desktop discovery: {} · {}",
+                    row.title,
+                    row.subtitle
+                );
+                capture_test_window(
+                    ui.window.upcast_ref(),
+                    "/tmp/spotlight-desktops-preview.png",
+                );
+                ui.launch(row);
+            }
+            6 => {
+                if ui.booster_busy.get() || !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(!ui.window.is_visible());
+                assert!(
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| i.subtitle.starts_with("Current")),
+                    "Temporary desktop became current: {}",
+                    ui.notice.text()
+                );
+                ui.execute_booster(boosters::Operation::SwitchDesktop(original_id.clone()));
+            }
+            7 => {
+                if ui.booster_busy.get() || !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(
+                    !ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| i.subtitle.starts_with("Current")),
+                    "Returned to the original desktop"
+                );
+                ui.window.present();
+                ui.search.set_text(&format!("switch {fixture_name}"));
+            }
+            8 => {
+                if !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert!(ui.visible.borrow().iter().any(|i|matches!(&i.action,Action::Booster(boosters::Operation::SwitchDesktop(id))if id==&fixture_id)));
+                assert!(!root.join("search-uncancelled").exists());
+                ui.search.set_text("plugin wasm-loop quit");
+            }
+            9 => {
+                if !ui
+                    .extension_session
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|s| !s.items.is_empty())
+                {
+                    return glib::ControlFlow::Continue;
+                }
+                println!(
+                    "Superpowers UI passed: compiled Rust WASM results, bounded looping plugin, query cancellation, streaming rg results, stale scan cancellation, live virtual desktop discovery, switch, return, combined switcher, and worker cleanup on quit"
+                );
+                ui.window.application().unwrap().quit();
+                return glib::ControlFlow::Break;
+            }
+            _ => unreachable!(),
+        }
+        phase += 1;
+        phase_at = std::time::Instant::now();
+        glib::ControlFlow::Continue
+    });
 }
 fn smoke_plus(ui: Rc<Ui>) {
     assert_eq!(std::env::var("SPOTLIGHT_PLUS_FIXTURES").as_deref(), Ok("1"));
@@ -6776,6 +7165,15 @@ fn capture_smoke(ui: Rc<Ui>) {
     });
 }
 fn main() -> glib::ExitCode {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--wasm-plugin-worker")) {
+        return match wasmplugins::worker() {
+            Ok(()) => glib::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("WASM plugin: {error}");
+                glib::ExitCode::FAILURE
+            }
+        };
+    }
     if std::env::args().any(|a| a == "--install-shortcut") {
         return match shortcut::install() {
             Ok(()) => glib::ExitCode::SUCCESS,
@@ -6908,7 +7306,9 @@ fn main() -> glib::ExitCode {
         }
         let built = build(app);
         if test {
-            if std::env::args().any(|a| a == "--plus-smoke-test") {
+            if std::env::args().any(|a| a == "--superpowers-smoke-test") {
+                smoke_superpowers(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--plus-smoke-test") {
                 smoke_plus(Rc::clone(&built));
             } else if std::env::args().any(|a| a == "--search-tools-smoke-test") {
                 smoke_search_tools(Rc::clone(&built));

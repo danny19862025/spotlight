@@ -20,6 +20,24 @@ pub struct Window {
     pub active: bool,
     #[serde(default)]
     pub minimized: bool,
+    #[serde(default)]
+    pub desktops: Vec<String>,
+}
+#[derive(serde::Deserialize, Debug)]
+pub struct Desktop {
+    pub id: String,
+    pub name: String,
+    pub number: usize,
+    pub current: bool,
+    pub windows: usize,
+}
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Request<'a> {
+    Windows,
+    Desktops,
+    FocusWindow { id: &'a str },
+    SwitchDesktop { id: &'a str },
 }
 type Replies = Mutex<HashMap<String, mpsc::Sender<String>>>;
 static REPLIES: OnceLock<Replies> = OnceLock::new();
@@ -85,7 +103,7 @@ fn call(
     )
     .map_err(|e| format!("KWin: {e}"))
 }
-fn request(focus: Option<&str>) -> Result<String, String> {
+fn request(request: Request<'_>) -> Result<String, String> {
     let name = BUS_NAME
         .get()
         .ok_or("Window switching requires a KDE KWin desktop session")?;
@@ -96,7 +114,7 @@ fn request(focus: Option<&str>) -> Result<String, String> {
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
         .map_err(|e| e.to_string())?;
     let path = directory.join(format!("{token}.js"));
-    let script = script(name, &token, focus);
+    let script = script(name, &token, &request);
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -156,16 +174,27 @@ fn request(focus: Option<&str>) -> Result<String, String> {
     let _ = fs::remove_file(path);
     result
 }
-fn script(service: &str, token: &str, focus: Option<&str>) -> String {
+fn script(service: &str, token: &str, request: &Request<'_>) -> String {
     let service = serde_json::to_string(service).unwrap();
     let token = serde_json::to_string(token).unwrap();
-    let target = serde_json::to_string(&focus).unwrap();
+    let request = serde_json::to_string(request).unwrap();
     format!(
         r#"(function() {{
 function reply(value) {{ callDBus({service}, '/local/spotlight/Windows', 'local.spotlight.Windows', 'Result', {token}, JSON.stringify(value)); }}
 try {{
-const windows = workspace.windowList(); const target = {target};
-if (target !== null) {{
+const windows = workspace.windowList(); const request = {request};
+const normal = windows.filter(w => !w.deleted && !w.specialWindow && !w.skipTaskbar && !w.skipSwitcher && w.normalWindow && ['local.spotlight.spotlight','local.spotlight.smoke','spotlight'].indexOf(String(w.resourceClass).toLowerCase()) < 0);
+if (request.kind === 'desktops') {{
+ reply(workspace.desktops.map((d,i) => ({{id:String(d.id),name:String(d.name),number:i+1,current:d===workspace.currentDesktop,windows:normal.filter(w => !w.desktops.length || w.desktops.indexOf(d)>=0).length}}))); return;
+}}
+if (request.kind === 'switch_desktop') {{
+ const d = workspace.desktops.find(d => String(d.id) === request.id);
+ if (!d) {{ reply({{error:'That virtual desktop no longer exists'}}); return; }}
+ workspace.currentDesktop = d;
+ reply({{focused:String(workspace.currentDesktop.id)===request.id}}); return;
+}}
+if (request.kind === 'focus_window') {{
+ const target = request.id;
  const w = windows.find(w => String(w.internalId) === target && !w.deleted);
  if (!w) {{ reply({{error:'That window has closed'}}); return; }}
  if (w.activities && w.activities.length && w.activities.indexOf(workspace.currentActivity) < 0) workspace.currentActivity = w.activities[0];
@@ -174,13 +203,13 @@ if (target !== null) {{
  if (typeof workspace.activateWindow === 'function') workspace.activateWindow(w); else workspace.activeWindow = w;
  reply({{focused: String(workspace.activeWindow && workspace.activeWindow.internalId) === target}}); return;
 }}
-reply(windows.filter(w => !w.deleted && !w.specialWindow && !w.skipTaskbar && w.normalWindow && String(w.resourceClass).toLowerCase() !== 'spotlight' && String(w.resourceClass).toLowerCase() !== 'local.spotlight.spotlight').slice(0,200).map(w => ({{id:String(w.internalId),title:String(w.caption),app:String(w.desktopFileName || w.resourceClass),active:!!w.active,minimized:!!w.minimized}})));
+reply(normal.slice(0,200).map(w => ({{id:String(w.internalId),title:String(w.caption),app:String(w.desktopFileName || w.resourceClass),active:!!w.active,minimized:!!w.minimized,desktops:w.desktops.map(d => String(d.name))}})));
 }} catch(e) {{ reply({{error:String(e)}}); }}
 }})();"#
     )
 }
 pub fn list() -> Result<Vec<Window>, String> {
-    let payload = request(None)?;
+    let payload = request(Request::Windows)?;
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload)
         && let Some(error) = value.get("error").and_then(|s| s.as_str())
     {
@@ -192,8 +221,16 @@ pub fn fetch(query: &str) -> Result<Vec<Entry>, String> {
     let mut windows: Vec<_> = list()?
         .into_iter()
         .filter_map(|window| {
-            core::score(query, &format!("{} {}", window.app, window.title))
-                .map(|score| (score, window))
+            core::score(
+                query,
+                &format!(
+                    "{} {} {}",
+                    window.app,
+                    window.title,
+                    window.desktops.join(" ")
+                ),
+            )
+            .map(|score| (score, window))
         })
         .collect();
     windows.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.active.cmp(&a.1.active)));
@@ -203,8 +240,13 @@ pub fn fetch(query: &str) -> Result<Vec<Entry>, String> {
         .map(|(_, w)| Entry {
             title: w.title,
             detail: format!(
-                "{} · {} · Enter to switch",
+                "{} · {} · {} · Enter to switch",
                 w.app,
+                if w.desktops.is_empty() {
+                    "All desktops".into()
+                } else {
+                    w.desktops.join(", ")
+                },
                 if w.minimized {
                     "Minimized"
                 } else if w.active {
@@ -233,8 +275,8 @@ pub fn focus(id: &str) -> Result<String, String> {
     {
         return Err("Invalid window identity".into());
     }
-    let response: serde_json::Value =
-        serde_json::from_str(&request(Some(id))?).map_err(|_| "Invalid KWin focus response")?;
+    let response: serde_json::Value = serde_json::from_str(&request(Request::FocusWindow { id })?)
+        .map_err(|_| "Invalid KWin focus response")?;
     if response["focused"] == true {
         Ok("Switched window".into())
     } else {
@@ -244,12 +286,83 @@ pub fn focus(id: &str) -> Result<String, String> {
             .into())
     }
 }
+pub fn desktops() -> Result<Vec<Desktop>, String> {
+    let payload = request(Request::Desktops)?;
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload)
+        && let Some(error) = value.get("error").and_then(|e| e.as_str())
+    {
+        return Err(error.into());
+    }
+    serde_json::from_str(&payload).map_err(|_| "Invalid KWin desktop list".into())
+}
+pub fn fetch_desktops(query: &str) -> Result<Vec<Entry>, String> {
+    let mut rows: Vec<_> = desktops()?
+        .into_iter()
+        .filter_map(|d| {
+            core::score(query, &format!("{} {}", d.number, d.name)).map(|score| (score, d))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.number.cmp(&b.1.number)));
+    let mut rows: Vec<_> = rows
+        .into_iter()
+        .map(|(_, d)| Entry {
+            title: format!("Desktop {} · {}", d.number, d.name),
+            detail: format!(
+                "{} · {} open windows · Enter to switch",
+                if d.current {
+                    "Current"
+                } else {
+                    "Virtual desktop"
+                },
+                d.windows
+            ),
+            badge: "Desktop",
+            operation: Some(Operation::SwitchDesktop(d.id)),
+        })
+        .collect();
+    if rows.is_empty() {
+        rows.push(boosters::hint(
+            "No matching virtual desktops",
+            "Search desktop <name or number> · configure desktops in KDE System Settings",
+        ));
+    }
+    Ok(rows)
+}
+pub fn fetch_switcher(query: &str) -> Result<Vec<Entry>, String> {
+    let mut rows = fetch(query)?;
+    rows.extend(fetch_desktops(query)?);
+    if rows.iter().any(|e| e.operation.is_some()) {
+        rows.retain(|e| e.operation.is_some());
+    }
+    Ok(rows)
+}
+pub fn switch_desktop(id: &str) -> Result<String, String> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || "{}-".contains(c))
+    {
+        return Err("Invalid desktop identity".into());
+    }
+    let response: serde_json::Value =
+        serde_json::from_str(&request(Request::SwitchDesktop { id })?)
+            .map_err(|_| "Invalid KWin desktop response")?;
+    if response["focused"] == true {
+        Ok("Switched virtual desktop".into())
+    } else {
+        Err(response["error"]
+            .as_str()
+            .unwrap_or("KWin could not switch desktops")
+            .into())
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn script_arguments_are_json_escaped() {
-        let text = script(":1.1", "token", Some("a\"b"));
+        let text = script(":1.1", "token", &Request::FocusWindow { id: "a\"b" });
         assert!(text.contains(r#"a\"b"#));
         assert!(text.contains("workspace.windowList()"));
         assert!(text.contains("workspace.activeWindow = w"));

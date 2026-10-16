@@ -2,7 +2,7 @@ use crate::core;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -32,6 +32,13 @@ pub enum Mode {
     Command,
     Search,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Runtime {
+    #[default]
+    Process,
+    Wasm,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
@@ -42,7 +49,12 @@ pub struct Manifest {
     pub description: String,
     #[serde(default = "default_icon")]
     pub icon: String,
+    #[serde(default)]
     pub command: Vec<String>,
+    #[serde(default)]
+    pub runtime: Runtime,
+    #[serde(default)]
+    pub module: Option<String>,
     #[serde(default)]
     pub mode: Mode,
     #[serde(default)]
@@ -108,7 +120,7 @@ pub enum Event {
 }
 pub fn query(text: &str) -> Option<(&str, &str)> {
     let (head, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
-    if head != "ext" {
+    if !["ext", "plugin"].contains(&head) {
         return None;
     }
     Some(
@@ -119,7 +131,22 @@ pub fn query(text: &str) -> Option<(&str, &str)> {
     )
 }
 pub fn discover() -> (Vec<Manifest>, Vec<String>) {
-    discover_at(&core::data_dir().join("scripts"))
+    let (mut manifests, mut errors) = discover_at(&core::data_dir().join("scripts"));
+    let (plugins, failures) = discover_at(&core::data_dir().join("plugins"));
+    errors.extend(failures);
+    for plugin in plugins {
+        if plugin.runtime != Runtime::Wasm {
+            errors.push(format!(
+                "{}: the plugins folder accepts only sandboxed WASM manifests",
+                plugin.id
+            ));
+        } else if manifests.iter().any(|m| m.id == plugin.id) {
+            errors.push(format!("Duplicate extension id: {}", plugin.id));
+        } else if manifests.len() < 64 {
+            manifests.push(plugin);
+        }
+    }
+    (manifests, errors)
 }
 pub fn discover_at(root: &Path) -> (Vec<Manifest>, Vec<String>) {
     let mut files = Vec::new();
@@ -181,8 +208,8 @@ impl Manifest {
         if self.name.is_empty()
             || self.name.len() > 160
             || self.description.len() > 1024
-            || self.command.is_empty()
-            || self.command.first().is_some_and(|s| s.is_empty())
+            || (self.runtime == Runtime::Process
+                && (self.command.is_empty() || self.command.first().is_some_and(|s| s.is_empty())))
             || self.command.len() > 32
             || self
                 .command
@@ -190,6 +217,18 @@ impl Manifest {
                 .any(|s| s.len() > 4096 || s.contains('\0'))
         {
             return Err("Invalid name, description, or command argument vector".into());
+        }
+        match self.runtime {
+            Runtime::Wasm => {
+                if !self.command.is_empty() {
+                    return Err("WASM plugins declare module, never command".into());
+                }
+                self.module_path()?;
+            }
+            Runtime::Process if self.module.is_some() => {
+                return Err("module requires runtime: wasm".into());
+            }
+            _ => {}
         }
         if !(100..=30000).contains(&self.timeout_ms) || self.args.len() > 16 {
             return Err("timeout_ms must be 100–30000; at most 16 arguments are supported".into());
@@ -203,6 +242,33 @@ impl Manifest {
             return Err("Invalid argument definition".into());
         }
         Ok(())
+    }
+    pub fn module_path(&self) -> Result<PathBuf, String> {
+        let module = self
+            .module
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or("WASM plugins require module")?;
+        if Path::new(module).is_absolute() {
+            return Err("module must be relative to the plugin directory".into());
+        }
+        let path = self
+            .directory
+            .join(module)
+            .canonicalize()
+            .map_err(|e| format!("WASM module: {e}"))?;
+        let directory = self.directory.canonicalize().map_err(|e| e.to_string())?;
+        if !path.starts_with(directory)
+            || !path.is_file()
+            || path.extension().is_none_or(|s| s != "wasm")
+            || fs::metadata(&path).map_err(|e| e.to_string())?.len()
+                > crate::wasmplugins::MODULE_LIMIT as u64
+        {
+            return Err(
+                "module must be a .wasm file inside the plugin directory, at most 4 MiB".into(),
+            );
+        }
+        Ok(path)
     }
     pub fn arguments(&self, text: &str) -> Result<Vec<String>, String> {
         if self.mode == Mode::Search {
@@ -337,31 +403,71 @@ fn run_inner(
 ) -> Result<(), String> {
     manifest.validate()?;
     manifest.validate_args(args)?;
-    let exe = &manifest.command[0];
-    let program = if !Path::new(exe).is_absolute() && exe.contains('/') {
-        manifest.directory.join(exe)
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Extension cancelled".into());
+    }
+    let mut command;
+    let input;
+    if manifest.runtime == Runtime::Wasm {
+        command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+        command
+            .arg("--wasm-plugin-worker")
+            .arg(manifest.module_path()?)
+            .env_clear();
+        // A sandbox worker must not outlive Spotlight, including abrupt exits.
+        let parent = std::process::id() as i32;
+        unsafe {
+            command.pre_exec(move || {
+                if prctl(1, 9usize, 0usize, 0usize, 0usize) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(10));
+                }
+                Ok(())
+            });
+        }
+        input = Some(serde_json::to_vec(&serde_json::json!({"api_version":1,"query":if manifest.mode == Mode::Search {args.first().map(String::as_str).unwrap_or("")} else {""},"args":args})).map_err(|e| e.to_string())?);
     } else {
-        PathBuf::from(exe)
-    };
-    let mut child = Command::new(program)
-        .args(&manifest.command[1..])
-        .args(args)
-        .current_dir(&manifest.directory)
-        .env("SPOTLIGHT_EXTENSION_API", "1")
-        .env(
-            "SPOTLIGHT_QUERY",
-            if manifest.mode == Mode::Search {
-                args.first().map(String::as_str).unwrap_or("")
-            } else {
-                ""
-            },
-        )
-        .stdin(Stdio::null())
+        let exe = &manifest.command[0];
+        let program = if !Path::new(exe).is_absolute() && exe.contains('/') {
+            manifest.directory.join(exe)
+        } else {
+            PathBuf::from(exe)
+        };
+        command = Command::new(program);
+        command
+            .args(&manifest.command[1..])
+            .args(args)
+            .current_dir(&manifest.directory)
+            .env("SPOTLIGHT_EXTENSION_API", "1")
+            .env(
+                "SPOTLIGHT_QUERY",
+                if manifest.mode == Mode::Search {
+                    args.first().map(String::as_str).unwrap_or("")
+                } else {
+                    ""
+                },
+            );
+        input = None;
+    }
+    let mut child = command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
         .map_err(|e| format!("Could not start {}: {e}", manifest.name))?;
+    if let Some(input) = input {
+        let mut pipe = child.stdin.take().unwrap();
+        std::thread::spawn(move || {
+            let _ = pipe.write_all(&input);
+        });
+    }
     let group = child.id() as i32;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -499,6 +605,8 @@ fn run_inner(
 }
 unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
+    fn prctl(option: i32, ...) -> i32;
+    fn getppid() -> i32;
 }
 #[cfg(test)]
 mod tests {
@@ -531,6 +639,8 @@ mod tests {
             description: String::new(),
             icon: default_icon(),
             command: vec!["sh".into(), "fixture.sh".into()],
+            runtime: Runtime::Process,
+            module: None,
             mode: Mode::Search,
             args: vec![],
             timeout_ms: 5000,
@@ -548,6 +658,27 @@ mod tests {
         cancel.store(true, Ordering::Relaxed);
         worker.join().unwrap();
         assert!(matches!(rx.recv().unwrap(), Event::Done(Err(_))));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn wasm_manifest_rejects_commands_and_escaping_modules() {
+        let root =
+            std::env::temp_dir().join(format!("spotlight-wasm-manifest-{}", std::process::id()));
+        fs::create_dir_all(root.join("plugin")).unwrap();
+        fs::write(root.join("plugin/plugin.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        fs::write(root.join("outside.wasm"), b"\0asm\x01\0\0\0").unwrap();
+        let mut manifest: Manifest = serde_json::from_str(r#"{"schema_version":1,"id":"wasm","name":"WASM","runtime":"wasm","module":"plugin.wasm"}"#).unwrap();
+        manifest.directory = root.join("plugin");
+        assert!(manifest.validate().is_ok());
+        manifest.command = vec!["sh".into()];
+        assert!(manifest.validate().is_err());
+        manifest.command.clear();
+        manifest.module = Some("../outside.wasm".into());
+        assert!(manifest.validate().is_err());
+        std::os::unix::fs::symlink(root.join("outside.wasm"), root.join("plugin/link.wasm"))
+            .unwrap();
+        manifest.module = Some("link.wasm".into());
+        assert!(manifest.validate().is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

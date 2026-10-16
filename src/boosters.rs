@@ -13,6 +13,8 @@ use std::{
 pub enum Query {
     Offline(crate::offline::Query),
     Windows(String),
+    Desktops(String),
+    Switcher(String),
     Text(crate::texttools::Query),
     Search(crate::search::Query),
     Pim(crate::pim::Kind, String),
@@ -39,6 +41,8 @@ impl Query {
             return Some(Self::Text(query));
         }
         Some(match head.to_ascii_lowercase().as_str() {
+            "desktop" | "desktops" => Self::Desktops(tail.into()),
+            "switch" | "switcher" => Self::Switcher(tail.into()),
             "window"
                 if !["shortcuts", "manager"]
                     .iter()
@@ -84,6 +88,7 @@ impl Query {
 pub enum Operation {
     Query(String),
     FocusWindow(String),
+    SwitchDesktop(String),
     OpenPath(PathBuf),
     Preview {
         title: String,
@@ -200,6 +205,8 @@ pub fn fetch(query: &Query) -> Result<Vec<Entry>, String> {
     match query {
         Query::Offline(query) => crate::offline::fetch(query),
         Query::Windows(query) => crate::windowing::fetch(query),
+        Query::Desktops(query) => crate::windowing::fetch_desktops(query),
+        Query::Switcher(query) => crate::windowing::fetch_switcher(query),
         Query::Text(query) => crate::texttools::fetch(query),
         Query::Search(query) => crate::search::fetch(query),
         Query::Pim(kind, text) => crate::pim::fetch(*kind, text),
@@ -578,6 +585,7 @@ fn decode_definitions(word: &str, output: &str) -> Result<Vec<Entry>, String> {
 pub fn execute(operation: Operation) -> Result<String, String> {
     match operation {
         Operation::FocusWindow(id) => crate::windowing::focus(&id),
+        Operation::SwitchDesktop(id) => crate::windowing::switch_desktop(&id),
         Operation::Terminate { pid, started } => {
             if pid <= 1 || pid == std::process::id() || process_identity(pid)? != started {
                 return Err("Process changed or exited; search again".into());

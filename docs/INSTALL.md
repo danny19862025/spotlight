@@ -193,7 +193,8 @@ export PATH="$HOME/.local/bin:$PATH"
 | --- | --- |
 | Clipboard history | KDE Klipper for text and saved images (image database version 3); current images can also be read directly from the clipboard |
 | Offline dictionary | Local dictd-format dictionaries; `gzip` for compressed files, or an optional loopback dictd server; see [setup](OFFLINE.md) |
-| Manifest extensions | The runtime declared by each installed script; see [API](EXTENSIONS.md) |
+| WASM plugins | Built into Spotlight; plugin authors need a wasm32 compiler, users need no external runtime. See [WASM/SDK setup](WASM.md) |
+| Native manifest extensions | The runtime declared by each installed script; see [API](EXTENSIONS.md) |
 | Developer tools | `git`, optional GitHub CLI `gh`, Docker/Podman, and optional Espanso for desktop snippet expansion |
 | Content search | `rg` (ripgrep) |
 | Contacts and calendar | Optional Akonadi bridge; see [PIM setup](PIM.md) |
