@@ -605,7 +605,7 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spotlight"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gtk4",
  "serde",

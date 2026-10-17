@@ -1,6 +1,7 @@
 mod about;
 mod boosters;
 mod caffeinate;
+mod calendar;
 mod clipimage;
 mod color;
 mod core;
@@ -38,6 +39,7 @@ use std::{
 enum Page {
     Root,
     Files,
+    Recent,
     Clipboard,
     Snippets,
     Links,
@@ -52,7 +54,8 @@ impl Page {
     fn title(self) -> &'static str {
         match self {
             Self::Root => "Suggestions",
-            Self::Files => "Files · home folder",
+            Self::Files => "Search File · home folder",
+            Self::Recent => "Recent · files & folders",
             Self::Clipboard => "Clipboard history · KDE Klipper",
             Self::Snippets => "Snippets",
             Self::Links => "Quicklinks",
@@ -66,8 +69,9 @@ impl Page {
     }
     fn placeholder(self) -> &'static str {
         match self {
-            Self::Root => "Search apps, files, emoji, or the web…",
+            Self::Root => "Search apps, commands, or the web…",
             Self::Files => "Search your files…",
+            Self::Recent => "Search recent files & folders…",
             Self::Clipboard => "Search clipboard history…",
             Self::Snippets => "Search snippets…",
             Self::Links => "Search quicklinks…",
@@ -126,6 +130,7 @@ enum Action {
     CaptureNote(String),
     Schedule(reminder::Draft),
     CancelReminder(String),
+    CalendarEvent(calendar::Draft),
 }
 #[derive(Clone)]
 struct Item {
@@ -167,6 +172,7 @@ struct Ui {
     add: gtk::Button,
     back: gtk::Button,
     window_shortcuts: gtk::Button,
+    file_shortcuts: gtk::Box,
     store: RefCell<Store>,
     can_save: bool,
     page: RefCell<Page>,
@@ -226,6 +232,7 @@ struct Ui {
     alarm_window: RefCell<Option<gtk::Window>>,
     alarm_repeat: RefCell<Option<glib::SourceId>>,
     alarm_label: RefCell<Option<gtk::Label>>,
+    event_editor: RefCell<Option<gtk::Window>>,
 }
 struct ContentSession {
     query: search::Query,
@@ -286,9 +293,13 @@ impl Ui {
         self.add
             .set_visible(matches!(page, Page::Snippets | Page::Links | Page::Notes));
         self.window_shortcuts.set_visible(page == Page::Windows);
+        self.file_shortcuts.set_visible(page == Page::Root);
         self.search.grab_focus();
         if page == Page::Files {
             self.load_files();
+        }
+        if page == Page::Recent {
+            self.load_recents();
         }
         if page == Page::Clipboard {
             self.load_clipboard();
@@ -329,14 +340,19 @@ impl Ui {
             }
         });
     }
-    fn file_items(&self, query: &str) -> Vec<Item> {
+    fn file_items(&self, query: &str, recent_only: bool) -> Vec<Item> {
         let files = self.files.borrow();
         let recent = self.recents.borrow();
+        let indexed = if recent_only {
+            &[][..]
+        } else {
+            files.as_slice()
+        };
         let mut seen = std::collections::HashSet::new();
         let mut matches: Vec<_> = recent
             .iter()
             .map(|(p, _)| p)
-            .chain(files.iter())
+            .chain(indexed.iter())
             .filter(|p| !core::hidden_path(p))
             .filter(|p| seen.insert(p.to_path_buf()))
             .filter_map(|path| {
@@ -888,6 +904,32 @@ impl Ui {
             None => format!("Saved to {} · {}", self.note_destination(), note.title),
         };
         Ok((note, message))
+    }
+    fn calendar_event(self: &Rc<Self>, draft: calendar::Draft) {
+        if let Some(dialog) = self.event_editor.borrow().as_ref() {
+            dialog.present();
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let dialog = calendar::editor(&self.window, draft, move |message, title| {
+            if let Some(ui) = weak.upgrade() {
+                ui.booster_cache
+                    .borrow_mut()
+                    .retain(|q, _| !matches!(q, boosters::Query::Pim(pim::Kind::Calendar, _)));
+                ui.page(Page::Root);
+                ui.search.set_text(&format!("calendar {title}"));
+                ui.error(&message);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        dialog.connect_close_request(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.event_editor.borrow_mut().take();
+            }
+            glib::Propagation::Proceed
+        });
+        *self.event_editor.borrow_mut() = Some(dialog.clone());
+        dialog.present();
     }
     fn quick_note(self: &Rc<Self>, initial: &str) {
         if let Some(dialog) = self.note_editor.borrow().as_ref() {
@@ -2306,13 +2348,15 @@ impl Ui {
         let mut out = self.apps.borrow().clone();
         let mut help = item(
             "walkthrough",
-            "Getting Started",
-            "A short walkthrough of Spotlight · F1",
+            "Spotlight Guide",
+            "Every feature, commands, examples, and shortcuts · F1",
             "help-browser-symbolic",
             "Guide",
             Action::Walkthrough,
         );
-        help.keywords = "help walkthrough basics tutorial getting started".into();
+        help.keywords =
+            "guide help walkthrough basics tutorial getting started features functions commands"
+                .into();
         out.push(help);
         out.extend(self.extension_menu());
         out.push(item(
@@ -2323,14 +2367,6 @@ impl Ui {
             "Emoji",
             Action::EmojiTones,
         ));
-        if self.search.text().trim().is_empty() {
-            out.extend(
-                self.file_items("")
-                    .into_iter()
-                    .filter(|i| i.badge == "Recent")
-                    .take(10),
-            );
-        }
         if self.store.borrow().selected_font.is_some() {
             out.push(item(
                 "reset-font",
@@ -2359,6 +2395,16 @@ impl Ui {
             "Note",
             Action::QuickNote(String::new()),
         ));
+        let mut add_event = item(
+            "add-calendar-event",
+            "Add Calendar Event",
+            "event Dinner on July 13 2027 at 6pm · review before saving",
+            "x-office-calendar-symbolic",
+            "Calendar",
+            Action::CalendarEvent(calendar::Draft::default()),
+        );
+        add_event.keywords = "new event add event create event calendar appointment".into();
+        out.push(add_event);
         let store = self.store.borrow();
         for (index, snippet) in store.snippets.iter().enumerate() {
             let mut result = item(
@@ -2533,12 +2579,6 @@ impl Ui {
                 "base64 encode ",
             ),
             (
-                "recents",
-                "Recent Files & Folders",
-                "Actual XDG and KDE recent documents · newest first",
-                "recent ",
-            ),
-            (
                 "content-search",
                 "Search File Contents",
                 "Use ripgrep · in: notes rust or in: ~/Projects phrase",
@@ -2667,9 +2707,15 @@ impl Ui {
             ),
             (
                 Page::Files,
-                "Search Files",
+                "Search File",
                 "Find files and folders in your home directory",
                 "folder-symbolic",
+            ),
+            (
+                Page::Recent,
+                "Recent",
+                "Recently opened files and folders · newest first",
+                "document-open-recent-symbolic",
             ),
             (
                 Page::Clipboard,
@@ -2714,6 +2760,9 @@ impl Ui {
                 "face-smile-symbolic",
             ),
         ] {
+            if matches!(p, Page::Files | Page::Recent) && self.search.text().trim().is_empty() {
+                continue;
+            }
             out.push(item(name, name, desc, icon, "Command", Action::Page(p)));
         }
         for (name, icon, args) in [
@@ -3313,16 +3362,6 @@ impl Ui {
             self.extension_session.borrow_mut().take();
         }
         self.section.set_text(page.title());
-        if page == Page::Root
-            && !q.is_empty()
-            && boosters::Query::parse(q).is_none()
-            && extensions::query(q).is_none()
-        {
-            self.load_files();
-            if *self.file_loading.borrow() {
-                self.section.set_text("Searching · indexing your files…");
-            }
-        }
         let mut items = match page {
             Page::Root if explicit_lookup => Vec::new(),
             Page::Root => self.root(),
@@ -3331,8 +3370,9 @@ impl Ui {
                 if *self.file_loading.borrow() {
                     self.section.set_text("Indexing your home folder…");
                 }
-                self.file_items(q)
+                self.file_items(q, false)
             }
+            Page::Recent => self.file_items(q, true),
             Page::Clipboard => self.clipboard_items(),
             Page::Snippets | Page::Links | Page::Notes => {
                 let store = self.store.borrow();
@@ -3423,7 +3463,6 @@ impl Ui {
         };
         if page == Page::Root && !q.is_empty() && !explicit_lookup {
             items.extend(self.emoji_items());
-            items.extend(self.file_items(q));
             items.extend(self.font_items());
             if self.picked_color.borrow().is_some() {
                 items.extend(self.color_items());
@@ -3649,6 +3688,7 @@ impl Ui {
         }
         if page == Page::Root
             && let Some(command) = boosters::Query::parse(q)
+            && calendar::parse(q).is_none()
         {
             let web = results.into_iter().find(|i| i.id == "web");
             results = self.booster_items(command);
@@ -3664,6 +3704,46 @@ impl Ui {
             self.section
                 .set_text("Extension results · Escape cancels · Ctrl+R reruns");
         }
+        if page == Page::Root {
+            if let Some(parsed) = calendar::parse(q) {
+                let entry = match parsed {
+                    Ok(draft) => item(
+                        "create-calendar-event",
+                        if draft.title.is_empty() {
+                            "Add Calendar Event"
+                        } else {
+                            &draft.title
+                        },
+                        &format!("{} · Enter to review and add", draft.label()),
+                        "x-office-calendar-symbolic",
+                        "Add event",
+                        Action::CalendarEvent(draft.clone()),
+                    ),
+                    Err(error) => item(
+                        "calendar-event-help",
+                        "Add Calendar Event",
+                        &format!("{error} · Try event Dinner on July 13 2027 at 6pm"),
+                        "x-office-calendar-symbolic",
+                        "Calendar",
+                        Action::Noop,
+                    ),
+                };
+                results = vec![entry];
+                self.section.set_text("Calendar · create an event");
+            } else if ["calendar", "events"].contains(&q.to_ascii_lowercase().as_str()) {
+                results.insert(
+                    0,
+                    item(
+                        "add-calendar-event",
+                        "Add Calendar Event",
+                        "Choose a date, time, and calendar",
+                        "x-office-calendar-symbolic",
+                        "Calendar",
+                        Action::CalendarEvent(calendar::Draft::default()),
+                    ),
+                );
+            }
+        }
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -3671,10 +3751,12 @@ impl Ui {
             self.list.append(&self.row(i));
         }
         if results.is_empty() {
-            self.section.set_text(if page == Page::Scripts {
-                "No plugins or scripts yet · open their folders in Settings"
-            } else {
-                "No results · try another search"
+            self.section.set_text(match page {
+                Page::Scripts => "No plugins or scripts yet · open their folders in Settings",
+                Page::Files if *self.file_loading.borrow() => "Indexing your home folder…",
+                Page::Recent if self.recents_loading.get() => "Loading recent files…",
+                Page::Recent if q.is_empty() => "No recent files yet · opened files appear here",
+                _ => "No results · try another search",
             });
         }
         *self.visible.borrow_mut() = results;
@@ -3989,6 +4071,10 @@ impl Ui {
             }
             Action::TimerSetup => {
                 self.timer_setup();
+                return;
+            }
+            Action::CalendarEvent(draft) => {
+                self.calendar_event(draft);
                 return;
             }
             Action::AlarmSetup => {
@@ -4623,9 +4709,9 @@ impl Ui {
         let pages = tabs.downgrade();
         let guide = guide::panel(app, self.guide_step.get(), on_change, move |action| {
             let Some(ui) = weak.upgrade() else { return };
-            if matches!(action, guide::Action::Theme) {
+            if let guide::Action::Settings(name) = action {
                 if let Some(tabs) = pages.upgrade() {
-                    tabs.set_visible_child_name("theme");
+                    tabs.set_visible_child_name(name);
                 }
                 return;
             }
@@ -4638,12 +4724,12 @@ impl Ui {
                     ui.search.set_text(&query);
                     ui.search.set_position(-1);
                 }
-                guide::Action::Clipboard => ui.page(Page::Clipboard),
+                guide::Action::Page(page) => ui.page(page),
                 guide::Action::Finish => {
                     ui.guide_step.set(0);
                     ui.page(Page::Root);
                 }
-                guide::Action::Theme => unreachable!(),
+                guide::Action::Settings(_) => unreachable!(),
             }
             ui.window.present();
             ui.search.grab_focus();
@@ -5052,6 +5138,36 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     settings.set_tooltip_text(Some("Settings"));
     top.append(&settings);
     shell.append(&top);
+    let file_shortcuts = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    file_shortcuts.add_css_class("file-shortcuts");
+    file_shortcuts.set_widget_name("file-shortcuts");
+    let search_file = gtk::Button::new();
+    let recent_files = gtk::Button::new();
+    for (button, name, label, icon) in [
+        (
+            &search_file,
+            "search-file",
+            "Search File",
+            "folder-symbolic",
+        ),
+        (
+            &recent_files,
+            "recent-files",
+            "Recent",
+            "document-open-recent-symbolic",
+        ),
+    ] {
+        button.set_widget_name(name);
+        let contents = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        contents.append(&gtk::Image::from_icon_name(icon));
+        contents.append(&gtk::Label::new(Some(label)));
+        button.set_child(Some(&contents));
+        button.update_property(&[gtk::accessible::Property::Label(label)]);
+        file_shortcuts.append(button);
+    }
+    search_file.set_tooltip_text(Some("Search files and folders · keeps your current search"));
+    recent_files.set_tooltip_text(Some("Browse recently opened files and folders"));
+    shell.append(&file_shortcuts);
     let section = gtk::Label::new(Some("Suggestions"));
     section.set_xalign(0.);
     section.add_css_class("section");
@@ -5141,6 +5257,7 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         add,
         back,
         window_shortcuts,
+        file_shortcuts,
         store: RefCell::new(store),
         can_save: load_error.is_none(),
         page: RefCell::new(Page::Root),
@@ -5195,6 +5312,7 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
         alarm_window: RefCell::new(None),
         alarm_repeat: RefCell::new(None),
         alarm_label: RefCell::new(None),
+        event_editor: RefCell::new(None),
     });
     if let Some(e) = load_error {
         ui.error(&format!(
@@ -5233,6 +5351,18 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
     ui.list.add_controller(motion);
     let u = Rc::clone(&ui);
     ui.back.connect_clicked(move |_| u.page(Page::Root));
+    let u = Rc::clone(&ui);
+    search_file.connect_clicked(move |_| {
+        let query = u.search.text().to_string();
+        u.page(Page::Files);
+        if boosters::Query::parse(query.trim()).is_none()
+            && extensions::query(query.trim()).is_none()
+        {
+            u.search.set_text(&query);
+        }
+    });
+    let u = Rc::clone(&ui);
+    recent_files.connect_clicked(move |_| u.page(Page::Recent));
     let u = Rc::clone(&ui);
     ui.add
         .connect_clicked(move |_| u.editor(*u.page.borrow(), None));
@@ -5274,6 +5404,9 @@ fn build(app: &gtk::Application) -> Rc<Ui> {
                     }
                     if *u.page.borrow() == Page::Clipboard {
                         u.load_clipboard();
+                    }
+                    if *u.page.borrow() == Page::Recent {
+                        u.load_recents();
                     }
                     u.extension_session.borrow_mut().take();
                     u.booster_cache.borrow_mut().clear();
@@ -5436,6 +5569,304 @@ fn test_widget(
         child = widget.next_sibling();
     }
     None
+}
+fn smoke_guide(ui: Rc<Ui>) {
+    assert!(core::data_dir().starts_with("/tmp"));
+    ui.settings_at(2);
+    let mut phase = 0;
+    let started = std::time::Instant::now();
+    glib::timeout_add_local(Duration::from_millis(400), move || {
+        assert!(
+            started.elapsed().as_secs() < 15,
+            "Guide UI timed out at phase {phase}"
+        );
+        let chooser = |settings: &gtk::Window| -> gtk::DropDown {
+            test_widget(settings.upcast_ref(), &|w| {
+                w.widget_name() == "guide-topics"
+            })
+            .unwrap()
+            .downcast()
+            .unwrap()
+        };
+        let label = |settings: &gtk::Window, name: &str| -> gtk::Label {
+            test_widget(settings.upcast_ref(), &|w| w.widget_name() == name)
+                .unwrap()
+                .downcast()
+                .unwrap()
+        };
+        match phase {
+            0 => {
+                let settings = test_settings_window();
+                let menu = chooser(&settings);
+                let model = menu.model().unwrap();
+                assert_eq!(model.n_items(), 46);
+                assert!(menu.enables_search());
+                for index in 0..model.n_items() {
+                    menu.set_selected(index);
+                    assert_eq!(ui.guide_step.get(), index as usize);
+                    for name in [
+                        "guide-title",
+                        "guide-description",
+                        "guide-example",
+                        "guide-tip",
+                    ] {
+                        assert!(
+                            !label(&settings, name).text().is_empty(),
+                            "Topic {index}: {name}"
+                        );
+                    }
+                    assert!(
+                        label(&settings, "guide-progress")
+                            .text()
+                            .contains(&format!("{} of 46", index + 1))
+                    );
+                }
+                menu.set_selected(24);
+            }
+            1 => {
+                let settings = test_settings_window();
+                assert_eq!(
+                    label(&settings, "guide-title").text().as_str(),
+                    "Create calendar events from text"
+                );
+                assert!(
+                    label(&settings, "guide-example")
+                        .text()
+                        .contains("July 13 2027")
+                );
+                capture_test_window(&settings, "/tmp/spotlight-guide-calendar.png");
+                let menu = chooser(&settings);
+                menu.emit_by_name::<()>("activate", &[]);
+            }
+            2 => {
+                let settings = test_settings_window();
+                let menu = chooser(&settings);
+                let search: gtk::SearchEntry =
+                    test_widget(menu.upcast_ref(), &|w| w.is::<gtk::SearchEntry>())
+                        .unwrap()
+                        .downcast()
+                        .unwrap();
+                if search.text().as_str() != "uuid" {
+                    search.set_text("uuid");
+                    return glib::ControlFlow::Continue;
+                }
+                let list: gtk::ListView = test_widget(menu.upcast_ref(), &|w| {
+                    w.is::<gtk::ListView>() && w.is_mapped()
+                })
+                .unwrap()
+                .downcast()
+                .unwrap();
+                capture_test_window(&settings, "/tmp/spotlight-guide-topics.png");
+                assert_eq!(
+                    list.model().unwrap().n_items(),
+                    1,
+                    "Topic search matches words after the category prefix"
+                );
+                capture_test_window(&settings, "/tmp/spotlight-guide-topics.png");
+                let popup: gtk::Popover =
+                    test_widget(menu.upcast_ref(), &|w| w.is::<gtk::Popover>())
+                        .unwrap()
+                        .downcast()
+                        .unwrap();
+                popup.popdown();
+                menu.set_selected(24);
+                test_named_button(&settings, "guide-try").emit_clicked();
+                assert_eq!(ui.search.text().as_str(), "event on July 13 2027");
+                assert!(
+                    ui.event_editor.borrow().is_none(),
+                    "Guide example only prepares the event search"
+                );
+                assert!(ui.store.borrow().reminders.is_empty());
+                ui.settings_at(2);
+            }
+            3 => {
+                let settings = test_settings_window();
+                let menu = chooser(&settings);
+                assert_eq!(menu.selected(), 24, "Guide remembers a jumped-to topic");
+                menu.set_selected(6);
+                test_named_button(&settings, "guide-try").emit_clicked();
+                assert!(
+                    *ui.page.borrow() == Page::Recent,
+                    "Recent example opens the separate view"
+                );
+                ui.settings_at(2);
+            }
+            4 => {
+                let settings = test_settings_window();
+                chooser(&settings).set_selected(44);
+                test_named_button(&settings, "guide-try").emit_clicked();
+                let tabs: gtk::Stack = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast()
+                .unwrap();
+                assert_eq!(tabs.visible_child_name().as_deref(), Some("window"));
+                tabs.set_visible_child_name("guide");
+                chooser(&settings).set_selected(45);
+                assert_eq!(
+                    test_named_button(&settings, "guide-next")
+                        .label()
+                        .as_deref(),
+                    Some("Start searching")
+                );
+                test_named_button(&settings, "guide-back").emit_clicked();
+                assert_eq!(chooser(&settings).selected(), 44);
+                test_named_button(&settings, "guide-finish").emit_clicked();
+                assert!(*ui.page.borrow() == Page::Root);
+                assert_eq!(ui.guide_step.get(), 0);
+                ui.settings_at(2);
+            }
+            5 => {
+                let settings = test_settings_window();
+                assert_eq!(chooser(&settings).selected(), 0);
+                capture_test_window(&settings, "/tmp/spotlight-guide-overview.png");
+                settings.close();
+                println!(
+                    "Guide UI passed: all 46 topics, searchable topic menu, direct navigation, calendar and Recent examples, Settings links, remembered topic, Back, and Start searching"
+                );
+                ui.window.application().unwrap().quit();
+                return glib::ControlFlow::Break;
+            }
+            _ => unreachable!(),
+        }
+        phase += 1;
+        glib::ControlFlow::Continue
+    });
+}
+fn smoke_calendar(ui: Rc<Ui>) {
+    assert!(core::data_dir().starts_with("/tmp"));
+    ui.search.set_text("event on july 13 2027");
+    assert!(
+        matches!(&ui.visible.borrow()[0].action, Action::CalendarEvent(d) if d.year == 2027 && d.month == 7 && d.day == 13 && d.title.is_empty())
+    );
+    ui.activate();
+    let mut phase = 0;
+    let started = std::time::Instant::now();
+    let folder = core::data_dir().join("calendars");
+    let count = move || {
+        std::fs::read_dir(&folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .count()
+    };
+    glib::timeout_add_local(Duration::from_millis(350), move || {
+        assert!(
+            started.elapsed().as_secs() < 15,
+            "Calendar UI timed out at phase {phase}: {}",
+            ui.notice.text()
+        );
+        let field = |dialog: &gtk::Window, name: &str| -> gtk::Entry {
+            test_widget(dialog.upcast_ref(), &|w| w.widget_name() == name)
+                .unwrap()
+                .downcast()
+                .unwrap()
+        };
+        match phase {
+            0 => {
+                let dialog = ui.event_editor.borrow().as_ref().unwrap().clone();
+                let save = test_named_button(&dialog, "event-save");
+                if !save.is_sensitive() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert_eq!(count(), 0, "Preview creates no calendar files");
+                assert_eq!(field(&dialog, "event-date").text().as_str(), "2027-07-13");
+                let title = field(&dialog, "event-title");
+                title.set_text("Birthday café 🎉");
+                field(&dialog, "event-date").set_text("2027-02-30");
+                save.emit_clicked();
+                assert_eq!(count(), 0, "Invalid date cannot be saved");
+                field(&dialog, "event-date").set_text("July 13 2027");
+                title.set_text("");
+                save.emit_clicked();
+                assert_eq!(count(), 0, "A title is required");
+                title.set_text("Birthday café 🎉");
+                field(&dialog, "event-location").set_text("Room, one; café");
+            }
+            1 => {
+                let dialog = ui.event_editor.borrow().as_ref().unwrap().clone();
+                capture_test_window(&dialog, "/tmp/spotlight-event-all-day.png");
+                let save = test_named_button(&dialog, "event-save");
+                save.emit_clicked();
+                save.emit_clicked(); // A second activation must not duplicate a pending save.
+            }
+            2 => {
+                if ui.event_editor.borrow().is_some() || !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert_eq!(count(), 1, "One all-day event was persisted");
+                assert!(ui.visible.borrow().iter().any(|i| i.title == "Birthday café 🎉" && matches!(&i.action, Action::Preview { text, .. } if text.contains("20270713") && text.contains("20270714"))));
+                ui.search
+                    .set_text("add event Meeting on July 13 2027 at 3:30pm");
+                ui.activate();
+            }
+            3 => {
+                let dialog = ui.event_editor.borrow().as_ref().unwrap().clone();
+                if !test_named_button(&dialog, "event-save").is_sensitive() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert_eq!(field(&dialog, "event-time").text().as_str(), "15:30");
+                let duration: gtk::SpinButton = test_widget(dialog.upcast_ref(), &|w| {
+                    w.widget_name() == "event-duration"
+                })
+                .unwrap()
+                .downcast()
+                .unwrap();
+                duration.set_value(90.);
+                let all_day: gtk::CheckButton =
+                    test_widget(dialog.upcast_ref(), &|w| w.widget_name() == "event-all-day")
+                        .unwrap()
+                        .downcast()
+                        .unwrap();
+                assert!(!all_day.is_active());
+                field(&dialog, "event-title").set_text("Edited meeting");
+            }
+            4 => {
+                let dialog = ui.event_editor.borrow().as_ref().unwrap().clone();
+                capture_test_window(&dialog, "/tmp/spotlight-event-timed.png");
+                test_named_button(&dialog, "event-save").emit_clicked();
+            }
+            5 => {
+                if ui.event_editor.borrow().is_some() || !ui.booster_pending.borrow().is_empty() {
+                    return glib::ControlFlow::Continue;
+                }
+                assert_eq!(count(), 2);
+                assert_eq!(
+                    ui.search.text().as_str(),
+                    "calendar Edited meeting",
+                    "Search uses the edited title"
+                );
+                assert!(
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| i.title == "Edited meeting")
+                );
+                capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-event-search.png");
+                ui.search.set_text("event Cancelled on July 13 2027");
+                ui.activate();
+                let dialog = ui.event_editor.borrow().as_ref().unwrap().clone();
+                dialog.close();
+                assert!(ui.event_editor.borrow().is_none());
+                assert_eq!(count(), 2, "Cancel does not create an event");
+                let saved =
+                    std::fs::read_to_string(core::data_dir().join("data.json")).unwrap_or_default();
+                assert!(
+                    !saved.contains("Birthday café") && !saved.contains("Edited meeting"),
+                    "Event contents stay out of usage history"
+                );
+                println!(
+                    "Calendar UI passed: natural dates, required title, invalid-date rejection, review, all-day and timed saves, duplicate protection, edited title, persisted search, cancellation, and private usage history"
+                );
+                ui.window.application().unwrap().quit();
+                return glib::ControlFlow::Break;
+            }
+            _ => unreachable!(),
+        }
+        phase += 1;
+        glib::ControlFlow::Continue
+    });
 }
 fn smoke_notes(ui: Rc<Ui>) {
     glib::timeout_add_local_once(Duration::from_millis(500), move || {
@@ -6580,12 +7011,43 @@ fn smoke_search_tools(ui: Rc<Ui>) {
             15 => {
                 assert!(first.title.contains("Invalid Base64"));
                 ui.page(Page::Root);
+                assert!(
+                    ui.file_shortcuts.is_visible(),
+                    "File shortcuts are pinned above results"
+                );
+                assert!(
+                    !ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| matches!(i.badge.as_str(), "File" | "Recent")),
+                    "Home suggestions contain no loose files"
+                );
+                assert!(
+                    !*ui.files_ready.borrow() && !*ui.file_loading.borrow(),
+                    "Main search does not index files"
+                );
+                test_named_button(ui.window.upcast_ref(), "recent-files").emit_clicked();
             }
             16 => {
                 assert!(
-                    ui.visible.borrow().iter().any(|i| i.badge == "Recent"),
-                    "Recent suggestions on root"
+                    *ui.page.borrow() == Page::Recent && !ui.file_shortcuts.is_visible(),
+                    "Pinned Recent opens its own view"
                 );
+                assert!(
+                    ui.visible
+                        .borrow()
+                        .iter()
+                        .any(|i| i.title == "blue sample.png")
+                );
+                assert!(ui.visible.borrow().iter().all(|i| i.badge == "Recent"));
+                ui.search.set_text("story.md");
+                assert_eq!(
+                    ui.visible.borrow().len(),
+                    1,
+                    "Recent search filters history"
+                );
+                assert_eq!(ui.visible.borrow()[0].title, "story.md");
+                ui.page(Page::Root);
                 let saved =
                     std::fs::read_to_string(core::data_dir().join("data.json")).unwrap_or_default();
                 assert!(
@@ -6614,16 +7076,19 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                     );
                     assert_eq!(
                         results[1].id, "fixture:partial-app",
-                        "Other matching apps precede files"
+                        "Other matching apps remain available"
                     );
                     assert!(
                         results
                             .iter()
-                            .skip(2)
-                            .any(|i| i.id == file.to_string_lossy()),
-                        "Matching recent file remains available below apps"
+                            .all(|i| !matches!(i.badge.as_str(), "File" | "Recent")),
+                        "Main search excludes matching files and folders"
                     );
                 }
+                assert!(
+                    ui.file_shortcuts.is_visible(),
+                    "Pins stay visible while typing"
+                );
             }
             17 => {
                 let controllers = ui.list.observe_controllers();
@@ -6652,6 +7117,21 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                     "fixture:partial-app",
                     "Hover selects the app used by Enter and Open"
                 );
+                capture_test_window(
+                    ui.window.upcast_ref(),
+                    "/tmp/spotlight-pinned-files-preview.png",
+                );
+                test_named_button(ui.window.upcast_ref(), "search-file").emit_clicked();
+                assert!(
+                    *ui.page.borrow() == Page::Files,
+                    "Pinned Search File opens file search"
+                );
+                assert_eq!(
+                    ui.search.text().as_str(),
+                    "Priority Fixture",
+                    "File search keeps the typed query"
+                );
+                assert!(!ui.file_shortcuts.is_visible());
                 let folder = core::home()
                     .join("Priority Fixture Folder")
                     .to_string_lossy()
@@ -6662,11 +7142,12 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                     .iter()
                     .position(|item| item.id == folder)
                     .unwrap();
-                hover(index as i32);
+                ui.list
+                    .select_row(ui.list.row_at_index(index as i32).as_ref());
                 assert_eq!(
                     ui.selected().unwrap().id,
                     folder,
-                    "Hover selects folders too"
+                    "File search allows selecting folders"
                 );
                 ui.refresh();
                 assert_eq!(
@@ -6698,7 +7179,7 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                 motion.emit_by_name::<()>("enter", &[&20.0f64, &20.0f64]);
                 assert_eq!(
                     ui.selected().unwrap().id,
-                    "fixture:exact-app",
+                    core::home().join("Priority Fixture").to_string_lossy(),
                     "A stationary pointer does not replace keyboard selection after rebuilding rows"
                 );
                 let index = ui
@@ -6722,6 +7203,14 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                     "Mouse movement resumes selection after keyboard navigation"
                 );
                 capture_test_window(ui.window.upcast_ref(), "/tmp/spotlight-hover-preview.png");
+                let indexed_only = core::home().join("Search File Only.txt");
+                ui.search.set_text(&indexed_only.to_string_lossy());
+                assert!(ui.visible.borrow().iter().any(|i| matches!(&i.action, Action::Open(uri) if uri == gio::File::for_path(&indexed_only).uri().as_str())), "Search File accepts full paths to indexed files");
+                assert!(
+                    ui.file_items("Search File Only", true).is_empty(),
+                    "Recent excludes files that have never been opened"
+                );
+                ui.page(Page::Root);
                 ui.search.set_text("Priority Fixture App");
                 assert_eq!(
                     ui.selected().unwrap().id,
@@ -6883,13 +7372,13 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                 .unwrap()
                 .downcast::<gtk::Label>()
                 .unwrap();
-                assert!(progress.text().contains("1 of 6"));
+                assert!(progress.text().contains("1 of "));
                 let back = test_named_button(&settings, "guide-back");
                 assert!(!back.is_sensitive());
                 test_named_button(&settings, "guide-next").emit_clicked();
-                assert!(progress.text().contains("2 of 6"));
+                assert!(progress.text().contains("2 of "));
                 back.emit_clicked();
-                assert!(progress.text().contains("1 of 6"));
+                assert!(progress.text().contains("1 of "));
             }
             23 => {
                 let settings = test_settings_window();
@@ -6923,13 +7412,13 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                 .downcast::<gtk::Label>()
                 .unwrap();
                 assert!(
-                    progress.text().contains("4 of 6"),
+                    progress.text().contains("4 of "),
                     "Guide resumes after trying an example"
                 );
                 let next = test_named_button(&settings, "guide-next");
                 next.emit_clicked();
                 next.emit_clicked();
-                assert_eq!(next.label().as_deref(), Some("Start searching"));
+                assert_eq!(next.label().as_deref(), Some("Next"));
                 test_named_button(&settings, "guide-try").emit_clicked();
                 let tabs = test_widget(settings.upcast_ref(), &|w| {
                     w.widget_name() == "settings-pages"
@@ -6940,9 +7429,19 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                 assert_eq!(
                     tabs.visible_child_name().as_deref(),
                     Some("theme"),
-                    "Last step opens Theme settings"
+                    "Theme topic opens Theme settings"
                 );
                 tabs.set_visible_child_name("guide");
+                let chooser: gtk::DropDown = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "guide-topics"
+                })
+                .unwrap()
+                .downcast()
+                .unwrap();
+                let count = chooser.model().unwrap().n_items();
+                assert!(count >= 40, "Guide covers the full feature catalog");
+                chooser.set_selected(count - 1);
+                assert_eq!(next.label().as_deref(), Some("Start searching"));
                 next.emit_clicked();
                 assert_eq!(ui.search.text().as_str(), "");
                 assert!(*ui.page.borrow() == Page::Root);
@@ -7013,7 +7512,7 @@ fn smoke_search_tools(ui: Rc<Ui>) {
                 capture_test_window(&settings, "/tmp/spotlight-settings-general-preview.png");
                 settings.close();
                 println!(
-                    "Search UI passed: flat settings navigation, About logo and build version, walkthrough navigation, examples, resume and completion, Settings theme tab, saved presets and custom colors, validation and reset, app and folder hover selection, refresh preservation, keyboard/mouse selection, app priority over recent files, UUID regeneration, hash/Base64 vectors, inline cheat sheets, actual XDG recency and folders, async image thumbnails, real ripgrep content results, local PIM previews, invalid input, and private usage history"
+                    "Search UI passed: pinned Search File and Recent views, clean main search, query transfer, flat settings navigation, About logo and build version, walkthrough navigation, examples, resume and completion, Settings theme tab, saved presets and custom colors, validation and reset, app and folder hover selection, refresh preservation, keyboard/mouse selection, UUID regeneration, hash/Base64 vectors, inline cheat sheets, actual XDG recency and folders, async image thumbnails, real ripgrep content results, local PIM previews, invalid input, and private usage history"
                 );
                 ui.window.application().unwrap().quit();
                 return glib::ControlFlow::Break;
@@ -8028,24 +8527,22 @@ fn smoke(ui: Rc<Ui>) {
             let indexed_uri = gio::File::for_path(&indexed_path).uri().to_string();
             checked.search.set_text(&name);
             assert!(
-                checked
-                    .visible
-                    .borrow()
-                    .iter()
-                    .any(|entry| entry.badge == "File"
-                        && matches!(&entry.action, Action::Open(uri) if uri == &indexed_uri)),
-                "Main search finds indexed files with their open action"
+                checked.visible.borrow().iter().all(
+                    |entry| !matches!(&entry.action, Action::Open(uri) if uri == &indexed_uri)
+                ),
+                "Main search keeps indexed files inside Search File"
             );
             checked.search.set_text(&indexed_path.to_string_lossy());
+            test_named_button(checked.window.upcast_ref(), "search-file").emit_clicked();
             assert!(
                 checked
                     .visible
                     .borrow()
                     .iter()
                     .any(|entry| matches!(&entry.action, Action::Open(uri) if uri == &indexed_uri)),
-                "Main search accepts file paths"
+                "Pinned Search File accepts the path typed in main search"
             );
-            checked.search.set_text("");
+            checked.page(Page::Root);
             assert!(
                 !checked
                     .visible
@@ -8293,6 +8790,10 @@ fn main() -> glib::ExitCode {
                 smoke_alarm(Rc::clone(&built));
             } else if std::env::args().any(|a| a == "--notes-smoke-test") {
                 smoke_notes(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--calendar-smoke-test") {
+                smoke_calendar(Rc::clone(&built));
+            } else if std::env::args().any(|a| a == "--guide-smoke-test") {
+                smoke_guide(Rc::clone(&built));
             } else if std::env::args().any(|a| a == "--reminder-smoke-test") {
                 smoke_reminders(Rc::clone(&built));
             } else if std::env::args().any(|a| a == "--live-currency-test") {

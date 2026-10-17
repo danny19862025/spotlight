@@ -30,6 +30,18 @@ pub fn fetch(kind: Kind, query: &str) -> Result<Vec<Entry>, String> {
     let helper = helper_path();
     let mut rows = Vec::new();
     let mut status = None;
+    let mut desktop_calendar = false;
+    if kind == Kind::Calendar && !std::env::args().any(|a| a == "--smoke-test") {
+        match crate::calendar::desktop_events(query) {
+            Ok(events) => {
+                desktop_calendar = true;
+                for event in events {
+                    rows.extend(parse(kind, &event.payload, &event.collection, None));
+                }
+            }
+            Err(error) => status = Some(format!("Desktop calendar unavailable: {error}")),
+        }
+    }
     if let Some(helper) = helper {
         match boosters::run(
             Command::new(helper).arg(if kind == Kind::Contacts {
@@ -47,10 +59,11 @@ pub fn fetch(kind: Kind, query: &str) -> Result<Vec<Entry>, String> {
                     rows.extend(parse(kind, &item.payload, &item.collection, uri.as_deref()));
                 }
             }
-            Err(error) => status = Some(error),
+            Err(error) if !desktop_calendar => status = Some(error),
+            Err(_) => {}
         }
-    } else {
-        status = Some("Akonadi bridge is not installed · see docs/PIM.md".into());
+    } else if !desktop_calendar && status.is_none() {
+        status = Some("Desktop calendar bridge is unavailable · see docs/PIM.md".into());
     }
     // Also read the local vCard/iCalendar resources configured by KAddressBook/Akonadi.
     let mut seen = HashSet::new();

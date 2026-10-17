@@ -2,7 +2,7 @@ use crate::core;
 use serde_json::Value;
 use std::{
     fs,
-    io::Read,
+    io::{Read, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -142,13 +142,32 @@ pub fn hint(title: impl Into<String>, detail: impl Into<String>) -> Entry {
 // All tool arguments are passed directly, never interpolated into a shell.
 // Drain bounded output on separate threads so a noisy child cannot block GTK.
 pub fn run(command: &mut Command, seconds: u64) -> Result<String, String> {
+    run_input(command, seconds, None)
+}
+
+pub fn run_input(
+    command: &mut Command,
+    seconds: u64,
+    input: Option<&[u8]>,
+) -> Result<String, String> {
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Could not run {program}: {e}"))?;
+    if let Some(input) = input {
+        let input = input.to_vec();
+        let mut stdin = child.stdin.take().unwrap();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+    }
     fn drain(mut pipe: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<u8>> {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

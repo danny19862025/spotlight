@@ -28,6 +28,7 @@ with tempfile.TemporaryDirectory(prefix='spotlight-search-') as temp:
     note = home / 'Notes/story.md'
     note.write_text('Notes about development\nRust async makes the launcher responsive.\n')
     (home / 'Priority Fixture').write_text('App priority search fixture')
+    (home / 'Search File Only.txt').write_text('Indexed file without recent history')
     (home / 'Priority Fixture Folder').mkdir()
     (home / 'Notes/.hidden.md').write_text('Rust secret fixture')
     (home / 'Notes/target').mkdir()

@@ -197,7 +197,8 @@ export PATH="$HOME/.local/bin:$PATH"
 | Native manifest extensions | The runtime declared by each installed script; see [API](EXTENSIONS.md) |
 | Developer tools | `git`, optional GitHub CLI `gh`, Docker/Podman, and optional Espanso for desktop snippet expansion |
 | Content search | `rg` (ripgrep) |
-| Contacts and calendar | Optional Akonadi bridge; see [PIM setup](PIM.md) |
+| Contacts and Akonadi calendar search | Optional Akonadi bridge; local vCard/iCalendar files also work. See [PIM setup](PIM.md) |
+| GNOME Calendar/Evolution events | System `/usr/bin/python3`, PyGObject, Evolution Data Server, and `ECal-2.0` / `EDataServer-1.2` introspection libraries with configured calendars. Local-only event creation needs no desktop calendar bridge. See [calendar setup](PIM.md) |
 | Window Manager / switcher | KDE KWin; manager shortcuts also use KDE's shortcut service |
 | Speaker and microphone controls | WirePlumber's `wpctl` and a running PipeWire audio session |
 | Wi-Fi toggle | NetworkManager and `nmcli` |

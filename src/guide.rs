@@ -1,15 +1,18 @@
 use gtk::prelude::*;
 use std::{cell::Cell, rc::Rc};
+#[path = "guide_topics.rs"]
+mod catalog;
 
 #[derive(Clone)]
 pub enum Action {
     Search(String),
-    Clipboard,
-    Theme,
+    Page(crate::Page),
+    Settings(&'static str),
     Finish,
 }
 
 struct Step {
+    category: &'static str,
     title: &'static str,
     description: &'static str,
     example: String,
@@ -24,60 +27,35 @@ pub fn panel(
     changed: impl Fn(usize) + 'static,
     activate: impl Fn(Action) + 'static,
 ) -> gtk::Box {
-    let steps = Rc::new(vec![
-        Step {
-            title: "Find and open an app",
-            description: "Open Spotlight and type an app’s name. Matching apps appear first. Move your pointer over a result, or use ↑ and ↓, then press Enter to open it.",
-            example: app.clone(),
-            tip: "Meta+Space opens Spotlight on KDE when its shortcut is installed. You can also launch it from your app menu. Double-clicking a result opens it too.",
-            button: "Try app search",
-            action: Some(Action::Search(app)),
-        },
-        Step {
-            title: "Find files and folders",
-            description: "Type a filename or folder name in the same search bar. The full path appears below each result, so you can choose the right one.",
-            example: "recent files\nrecent folders".into(),
-            tip: "Recent files appear even outside the file index. Hidden files and hidden folders such as .config stay out of results.",
-            button: "Show recent files",
-            action: Some(Action::Search("recent files".into())),
-        },
-        Step {
-            title: "Get comfortable with shortcuts",
-            description: "The highlighted result is the one Spotlight will use. You can switch between the mouse and keyboard whenever you like.",
-            example: "↑ / ↓         Select a result\nEnter         Open or run\nCtrl+K        Show actions\nCtrl+F        Toggle favorite\nEscape        Go back or hide\nF1            Open this guide".into(),
-            tip: "Favorites and apps you use often get a ranking boost. Press Ctrl+Enter in the main search to search Google for what you typed.",
-            button: "",
-            action: None,
-        },
-        Step {
-            title: "Calculate without opening another app",
-            description: "Type a calculation or unit conversion into the main search. The answer appears at the top. Press Enter to copy it.",
-            example: "2+3*4       → 14\n10 km to mi → 6.2137 mi".into(),
-            tip: "The Try button fills in an example. It leaves you in control of copying or opening anything.",
-            button: "Try a calculation",
-            action: Some(Action::Search("2+3*4".into())),
-        },
-        Step {
-            title: "Reuse clipboard items and capture a note",
-            description: "Search for Clipboard History to find copied text and images. Select an item and press Enter to copy it again, then paste with Ctrl+V in your other app.",
-            example: "Clipboard History\nnote Buy milk".into(),
-            tip: "Clipboard history uses KDE Klipper. To save a quick note, type note followed by your text, then press Enter. Your note destination is shown in Settings → General.",
-            button: "Open Clipboard History",
-            action: Some(Action::Clipboard),
-        },
-        Step {
-            title: "Make Spotlight yours",
-            description: "Open Settings → Theme to choose Dark, Light, or Midnight. You can also pick your own background, text, accent, and selection colors.",
-            example: "Settings → Theme → Apply theme".into(),
-            tip: "The preview shows your changes before you apply them. Your saved theme is used next time Spotlight opens. Reopen this guide with F1 or by searching walkthrough.",
-            button: "Open Theme settings",
-            action: Some(Action::Theme),
-        },
-    ]);
+    let steps = Rc::new(catalog::topics(&app));
     let index = Rc::new(Cell::new(initial.min(steps.len() - 1)));
     let activate: Rc<dyn Fn(Action)> = Rc::new(activate);
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 18);
     panel.add_css_class("editor");
+    let chooser_label = gtk::Label::new(Some("Choose a topic · type to search the menu"));
+    chooser_label.set_xalign(0.);
+    chooser_label.add_css_class("subtitle");
+    panel.append(&chooser_label);
+    let labels: Vec<_> = steps
+        .iter()
+        .map(|t| format!("{} · {}", t.category, t.title))
+        .collect();
+    let chooser =
+        gtk::DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+    chooser.set_widget_name("guide-topics");
+    chooser.set_expression(Some(&gtk::PropertyExpression::new(
+        gtk::StringObject::static_type(),
+        None::<&gtk::Expression>,
+        "string",
+    )));
+    chooser.set_enable_search(true);
+    // GTK 4.12 adds this property; retain compatibility with GTK 4.10.
+    if chooser.find_property("search-match-mode").is_some() {
+        chooser.set_property("search-match-mode", gtk::StringFilterMatchMode::Substring);
+    }
+    chooser.set_selected(index.get() as u32);
+    chooser.update_property(&[gtk::accessible::Property::Label("Guide topic")]);
+    panel.append(&chooser);
     let progress = gtk::Label::new(None);
     progress.set_xalign(0.);
     progress.add_css_class("subtitle");
@@ -93,17 +71,22 @@ pub fn panel(
     description.set_xalign(0.);
     description.set_wrap(true);
     description.set_max_width_chars(55);
+    description.set_widget_name("guide-description");
     panel.append(&description);
     let example = gtk::Label::new(None);
     example.set_xalign(0.);
     example.set_selectable(true);
     example.set_wrap(true);
+    example.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    example.set_max_width_chars(55);
+    example.set_widget_name("guide-example");
     example.add_css_class("guide-example");
     panel.append(&example);
     let tip = gtk::Label::new(None);
     tip.set_xalign(0.);
     tip.set_wrap(true);
     tip.set_max_width_chars(55);
+    tip.set_widget_name("guide-tip");
     tip.add_css_class("subtitle");
     panel.append(&tip);
     let try_it = gtk::Button::new();
@@ -117,6 +100,9 @@ pub fn panel(
     let back = gtk::Button::with_label("Back");
     back.set_widget_name("guide-back");
     navigation.append(&back);
+    let finish = gtk::Button::with_label("Start searching");
+    finish.set_widget_name("guide-finish");
+    navigation.append(&finish);
     let gap = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     gap.set_hexpand(true);
     navigation.append(&gap);
@@ -131,10 +117,17 @@ pub fn panel(
         let back = back.downgrade();
         let next = next.downgrade();
         let try_it = try_it.downgrade();
+        let chooser = chooser.downgrade();
+        let container = panel.downgrade();
         Rc::new(move || {
             let i = index.get();
             let step = &steps[i];
-            progress.set_text(&format!("Getting started · {} of {}", i + 1, steps.len()));
+            progress.set_text(&format!(
+                "Feature guide · {} of {} · {}",
+                i + 1,
+                steps.len(),
+                step.category
+            ));
             title.set_text(step.title);
             description.set_text(step.description);
             example.set_text(&step.example);
@@ -153,6 +146,17 @@ pub fn panel(
                 try_it.set_visible(step.action.is_some());
                 try_it.set_label(step.button);
             }
+            if let Some(chooser) = chooser.upgrade() {
+                chooser.set_selected(i as u32);
+            }
+            if let Some(panel) = container.upgrade()
+                && let Some(scroll) = panel
+                    .ancestor(gtk::ScrolledWindow::static_type())
+                    .and_downcast::<gtk::ScrolledWindow>()
+            {
+                let adjustment = scroll.vadjustment();
+                adjustment.set_value(adjustment.lower());
+            }
             changed(i);
         })
     };
@@ -170,16 +174,113 @@ pub fn panel(
         step.set(step.get().saturating_sub(1));
         update();
     });
-    let step = index;
+    let action = Rc::clone(&activate);
+    finish.connect_clicked(move |_| action(Action::Finish));
+    let step = Rc::clone(&index);
     let update = Rc::clone(&render);
+    let total = steps.len();
     next.connect_clicked(move |_| {
-        if step.get() + 1 == steps.len() {
+        if step.get() + 1 == total {
             activate(Action::Finish);
         } else {
             step.set(step.get() + 1);
             update();
         }
     });
+    let update = Rc::clone(&render);
+    let step = index;
+    chooser.connect_selected_notify(move |chooser| {
+        let selected = chooser.selected() as usize;
+        if selected < total && selected != step.get() {
+            step.set(selected);
+            update();
+        }
+    });
     render();
     panel
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn feature_inventory_and_calendar_example() {
+        let steps = catalog::topics("Example app");
+        assert!(steps.len() >= 40);
+        let mut unique = std::collections::HashSet::new();
+        for step in &steps {
+            assert!(unique.insert(step.title));
+            assert!(
+                !step.category.is_empty()
+                    && !step.description.is_empty()
+                    && !step.example.is_empty()
+                    && !step.tip.is_empty()
+            );
+            assert_eq!(step.action.is_some(), !step.button.is_empty());
+        }
+        let catalog = steps
+            .iter()
+            .map(|s| format!("{} {} {}", s.title, s.description, s.example))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for feature in [
+            "Search File",
+            "Recent",
+            "ripgrep",
+            "Clipboard",
+            "Obsidian",
+            "Quicklinks",
+            "Snippets",
+            "Espanso",
+            "Emoji",
+            "Fonts",
+            "Currency",
+            "Calculator",
+            "Unit",
+            "dictionary",
+            "translation",
+            "tldr",
+            "UUID",
+            "Hash",
+            "Base64",
+            "calendar",
+            "Contacts",
+            "Timers",
+            "Alarms",
+            "Window Manager",
+            "virtual desktops",
+            "Color Picker",
+            "Measurement",
+            "Caffeinate",
+            "microphone",
+            "Wi-Fi",
+            "Bluetooth",
+            "Do Not Disturb",
+            "dark",
+            "Trash",
+            "Lock Screen",
+            "Screenshot",
+            "process",
+            "Git",
+            "Docker",
+            "Podman",
+            "Script",
+            "WASM",
+            "interface size",
+            "About",
+            "quitting",
+        ] {
+            assert!(
+                catalog.contains(feature),
+                "Missing guide feature: {feature}"
+            );
+        }
+        let calendar = steps
+            .iter()
+            .find(|s| s.title == "Create calendar events from text")
+            .unwrap();
+        assert!(
+            matches!(&calendar.action, Some(Action::Search(q)) if crate::calendar::parse(q).unwrap().is_ok())
+        );
+    }
 }

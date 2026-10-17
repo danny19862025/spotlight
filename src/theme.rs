@@ -89,6 +89,9 @@ row:selected .item-title {{ color: {selected_text}; }}
 row:selected .subtitle, row:selected .badge {{ color: {selected_text}; opacity: 0.78; }}
 .tile, button, .key {{ background: {raised}; color: {text}; border-color: {border}; }}
 button:hover {{ background: {selection}; color: {selected_text}; }}
+button:hover:not(:disabled), button:focus-visible:not(:disabled) {{ border-color: alpha({accent}, 0.65); box-shadow: 0 0 12px 1px alpha({accent}, 0.28); }}
+button:checked:not(:disabled) {{ border-color: {accent}; box-shadow: 0 0 10px 1px alpha({accent}, 0.22); }}
+button:active:not(:disabled) {{ box-shadow: 0 0 6px 1px alpha({accent}, 0.32); }}
 .accent label {{ color: {accent_text}; }}
 button:hover label {{ color: {selected_text}; }}
 .flat {{ background: transparent; }}
@@ -104,8 +107,8 @@ popover > contents {{ background: {surface}; color: {text}; border-color: {borde
 .settings-tabs button:checked {{ border-bottom-color: {accent}; }}
 .settings-tabs button:checked label {{ color: {accent}; }}
 .settings-tabs button:focus-visible {{ outline-color: {accent}; }}
-.settings-shell button:hover {{ box-shadow: 0 0 10px 1px alpha({accent}, 0.18); }}
-.settings-tabs button:hover {{ box-shadow: inset 0 -2px 10px alpha({accent}, 0.12); }}
+.settings-tabs button:hover:not(:disabled), .settings-tabs button:focus-visible:not(:disabled) {{ border-color: transparent; border-bottom-color: {accent}; box-shadow: inset 0 -2px 12px alpha({accent}, 0.22); }}
+.settings-tabs button:checked:not(:disabled) {{ box-shadow: inset 0 -2px 10px alpha({accent}, 0.18); }}
 .settings-shell .window-mode:checked {{ background: {selection}; border-color: {accent}; }}
 .settings-shell .window-mode:checked label {{ color: {selected_text}; }}
 .settings-shell .window-mode:checked .subtitle {{ color: {selected_text}; opacity: 0.75; }}
