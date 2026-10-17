@@ -2,7 +2,14 @@
 
 A native Linux launcher written in Rust and GTK 4, with a dark Raycast-style interface. Designed for KDE Plasma on Wayland. No browser, Electron, account, or background clipboard recorder is required. Optional GNOME Calendar/Evolution integration uses the system Python and introspection libraries.
 
-See [release notes](CHANGELOG.md) for the changes in v0.2.0.
+## New in v0.2.0
+
+- **Cleaner main search:** apps and commands stay in the main results. **Search File** and **Recent** are pinned below the search box and open their own searchable views. Search File keeps the text you already typed.
+- **Create calendar events by typing:** enter a title and date, review the details, and choose a calendar before saving. Supports configured GNOME Calendar/Evolution calendars and a local-only Spotlight calendar.
+- **A complete built-in Guide:** browse 46 topics covering every app feature, with searchable topics, example commands, shortcuts, and requirements. Open it with **F1**, search `guide`, or choose **Settings → Guide**.
+- **Theme-colored button glow:** buttons glow on hover and keyboard focus; selected buttons keep a soft glow using your accent color.
+
+See the [release notes](CHANGELOG.md) for the full update.
 
 ## Build and install
 
@@ -25,6 +32,22 @@ The first launch stays running; launching it again toggles the panel. Escape hid
 Move the pointer over a result to select it; Enter and the Open button use that selection. Arrow keys also select results. Background updates preserve the selection while the search stays the same.
 
 Buttons glow in your theme's accent color on hover or keyboard focus, and selected buttons keep a soft glow.
+
+## Try the new features
+
+| What you want to do | How to do it |
+| --- | --- |
+| Find a file or folder | Type a name, then choose the pinned **Search File** button. Full paths also work. |
+| Browse recently opened items | Choose the pinned **Recent** button, then type to filter the list. |
+| Prepare an event for a date | Type `event on July 13 2027`, press Enter, and fill in the title. |
+| Create an all-day event | Type `event Birthday on July 13 2027`, then press Enter to review it. |
+| Create an event with a time | Type `add event Dinner on July 13 2027 at 6pm`, then press Enter to review it. |
+| Find an existing event | Type `calendar Birthday` and press Enter on a result to preview its details. |
+| Learn any app feature | Press **F1** and open the topic menu. Type a feature name to find its guide page. |
+
+In the event review form, edit the title, date, all-day setting, local start time, duration, or location. Choose the destination calendar, then select **Add Event** or press **Ctrl+Enter**. A date without a time is an all-day event. **Cancel** or **Escape** closes the form without saving.
+
+Account calendars use the configured GNOME Calendar/Evolution service. **Spotlight (local only)** saves an iCalendar file on this computer without syncing it to an account. See [calendar setup and requirements](docs/PIM.md).
 
 ## Features
 
