@@ -1,5 +1,21 @@
 # Contacts and calendars
 
+## Find a free meeting slot
+
+`meet in 2h` finds a 30-minute slot starting at least two hours from now; `meet in 30m for 45m` accepts another duration. Search covers all hours over a seven-day horizon and returns a preview for copying. No event or invitation is created. This is the availability of your **cached Akonadi calendars**, not other attendees or unsynchronized account data. Open KOrganizer to synchronize before checking.
+
+Availability requires the native Akonadi bridge described below and a second helper built against Qt 6 Core and **libical**:
+
+```sh
+sh native/build-pim.sh
+sh native/build-freebusy.sh
+install -m 755 target/native/spotlight-pim target/native/spotlight-freebusy "$HOME/.local/lib/spotlight/"
+```
+
+`install.sh` builds each optional helper when its development dependencies are available. Availability uses Akonadi's cache-only public API, never database inspection or a sync request. The `calendar-busy` bridge mode refuses missing payloads, failed collections, and truncation: up to 100 collections, fewer than 500 items per collection, 2,000 total items, 64 KiB per item, and 900 KiB serialized output. No configured calendar or missing helper produces a setup error rather than an empty-calendar guess.
+
+The libical helper expands recurrence rules and exclusions, merges moved/cancelled recurrence instances, and interprets floating/all-day values in your local timezone, including daylight saving transitions. Transparent and cancelled events do not block time. Its bounds are a 1 MiB request, 10,000 expanded intervals, and a seven-second process deadline. Recurrence `RANGE` overrides, RDATE periods, duplicate masters, malformed data, and unresolved zones are refused. The ordinary `calendar` search below continues to show stored events; meeting availability has its own recurrence-aware path.
+
 ## Create calendar events
 
 Type `event Birthday on July 13 2027`, `event on July 13 2027`, or `add event Dinner on July 13 2027 at 6pm`. Press Enter to review the event. You can change the title, date, all-day setting, local start time, duration in minutes, location, and destination calendar. A title is required. Supported date forms include `July 13 2027`, `13 July 2027`, and `2027-07-13`; times accept 12-hour and 24-hour notation. A date without a time is an all-day event. **Add Event** or Ctrl+Enter saves; Cancel or Escape discards the form. No calendar write happens while typing or previewing.

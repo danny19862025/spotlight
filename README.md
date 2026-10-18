@@ -2,11 +2,35 @@
 
 A native Linux launcher written in Rust and GTK 4, with a dark Raycast-style interface. Designed for KDE Plasma on Wayland. No browser, Electron, account, or background clipboard recorder is required. Optional GNOME Calendar/Evolution integration uses the system Python and introspection libraries.
 
-## New in v0.2.0
+![Spotlight’s dark native launcher, with the persistent Tab actions hint](docs/images/spotlight.png)
+
+Actual GTK interface with demo data. [See file search](docs/images/spotlight-files.png).
+
+## Expanded productivity tools
+
+- **File quick actions:** select a file or folder and press **Tab** or **Ctrl+K** for Reveal in Dolphin, Copy Path, Move to Trash, Copy File, Open With, and Get Info (including size and MIME). Trash asks for confirmation.
+- **System search:** `ip` / `my ip`, `battery`, `disk`, `ram`, and `uptime` show copyable inline results. `ip local` skips public IP lookup.
+- **Text and image utilities:** `qr hello` generates an offline UTF-8 QR image; `ocr` extracts text from clipboard images or screenshots with Tesseract. `lorem 5`, `case camel/snake/kebab text`, and `json format {"ready":true}` add local developer tools.
+- **Clipboard pins and filters:** **Ctrl+K → Pin entry** keeps text or images in Spotlight. Use `clip text`, `clip images`, or `clip pinned`. Confirmed history clearing keeps pins.
+- **Windows, tabs, and audio:** `close window`, `quit app`, and `kill window` find targeted KWin windows; quit/force-quit actions confirm first. `tabs chrome` searches an existing local browser debugging endpoint. `speakers` lists audio outputs and switches the selected device.
+- **Packages, services, and devices:** `apt search`, `pacman Ss`, and `flatpak search` offer reviewed installation. `service status` lists user services; `systemctl restart docker` reviews a system service action. `bluetooth devices` and `bluetooth connect AirPods` list/connect known devices.
+
+- **Developer workflow:** `code myproject` and `jetbrains myproject` reopen recent projects. `project ~/Projects/myproject` sets context for `gh pr list`, `gh issue bug`, and `dotenv`. `ssh myserver` opens a configured alias in Konsole; `env PATH` inspects environment values. Snippets support `{cursor}` and `{clipboard}` in trigger expansion and Espanso export.
+
+- **Local AI and meeting availability:** `ai summarize clipboard` uses verified local-only Ollama; `meet in 2h` finds a slot from cached Akonadi calendars with recurrence handling. Both require their documented local dependencies.
+- **Search preferences and Extension Store:** Settings → General configures aliases, web fallback, and root command categories. `store` browses a local TOML catalog and offers reviewed, checksum-verified WASM installation from GitHub releases or the bundled SDK example.
+
+See **[commands, setup, requirements, and integration checks](docs/TOOLS.md)** for details. The built-in Guide includes these tools.
+
+## New in v0.3.0
+
+File and clipboard actions, system and developer tools, local AI, calendar availability, customizable search, and an Extension Store are covered in the expanded 78-topic Guide. This release also adds the permanent **Actions Tab** hint, opt-in hidden login startup, home file exclusions, strict Clippy CI, and native UI screenshots.
+
+## Interface and calendar
 
 - **Cleaner main search:** apps and commands stay in the main results. **Search File** and **Recent** are pinned below the search box and open their own searchable views. Search File keeps the text you already typed.
 - **Create calendar events by typing:** enter a title and date, review the details, and choose a calendar before saving. Supports configured GNOME Calendar/Evolution calendars and a local-only Spotlight calendar.
-- **A complete built-in Guide:** browse 46 topics covering every app feature, with searchable topics, example commands, shortcuts, and requirements. Open it with **F1**, search `guide`, or choose **Settings → Guide**.
+- **A complete built-in Guide:** browse 78 topics covering every app feature, with searchable topics, example commands, shortcuts, and requirements. Dedicated topics cover the new file actions, system tools, text generators, clipboard controls, and desktop integrations. Open it with **F1**, search `guide`, or choose **Settings → Guide**.
 - **Theme-colored button glow:** buttons glow on hover and keyboard focus; selected buttons keep a soft glow using your accent color.
 
 See the [release notes](CHANGELOG.md) for the full update.
@@ -27,7 +51,7 @@ sh install.sh
 
 Install as your normal user, without sudo. On KDE, run `~/.local/bin/spotlight --install-shortcut` to register **Meta+Space**. Existing shortcut conflicts are preserved. Other desktops need a custom shortcut in their keyboard settings; KDE integrations require KDE services.
 
-The first launch stays running; launching it again toggles the panel. Escape hides it. Use **Quit Spotlight** to exit. No automatic login startup is installed.
+The first launch stays running; launching it again toggles the panel. Escape hides it. Use **Quit Spotlight** to exit. Login startup is opt-in: run `spotlight --autostart` (or install with `sh install.sh --autostart`) to create a desktop entry that starts Spotlight hidden. Run `spotlight --no-autostart` to remove it. The entry uses `$XDG_CONFIG_HOME/autostart`, falling back to `~/.config/autostart`.
 
 Move the pointer over a result to select it; Enter and the Open button use that selection. Arrow keys also select results. Background updates preserve the selection while the search stays the same.
 
@@ -37,7 +61,7 @@ Buttons glow in your theme's accent color on hover or keyboard focus, and select
 
 | What you want to do | How to do it |
 | --- | --- |
-| Find a file or folder | Type a name, then choose the pinned **Search File** button. Full paths also work. |
+| Find a file or folder | Type a name, then choose the pinned **Search File** button. Full paths also work. Enter opens folders in the file manager and files with their default app. |
 | Browse recently opened items | Choose the pinned **Recent** button, then type to filter the list. |
 | Prepare an event for a date | Type `event on July 13 2027`, press Enter, and fill in the title. |
 | Create an all-day event | Type `event Birthday on July 13 2027`, then press Enter to review it. |
@@ -53,14 +77,14 @@ Account calendars use the configured GNOME Calendar/Evolution service. **Spotlig
 
 - Fuzzy application search with desktop icons, favorites, and usage ranking. Main search keeps apps and commands together; files live in separate views. Apps are ordered by match quality, favorites, and usage.
 - Settings has flat, underlined General, Window, Theme, Guide, and About tabs. Window offers Compact and Expanded layouts and four interface sizes (90–125%); Apply changes updates the launcher and Settings immediately and remembers your choice. Settings buttons have a subtle hover glow. About shows the build version and a gently animated Spotlight logo; the logo respects the system animation preference. Theme offers Dark, Light, and Midnight presets, with color pickers and hex fields for background, text, accent, and selection colors. Preview changes before choosing Apply theme; preferences survive restarts. Reset colors restores the Dark preset in the editor, ready to apply.
-- The built-in Guide has 46 topics covering every app feature, with instructions, example commands, shortcuts, and requirements. Press F1, search `guide` or `walkthrough`, or open Settings → Guide. The searchable topic menu jumps directly to a feature; Back and Next browse the catalog. Example buttons open a view or prepare a search for you to review. The guide remembers the current topic during the session, and Start searching returns to the launcher from any topic.
-- **Search File** stays pinned below the main search box alongside **Recent**, above the scrolling results. Choose it to search by filename or path; it carries over text already typed in main search. File indexing starts when this view opens. Full paths appear under results. Bounded to 25,000 entries, six directory levels, excluding hidden files, symlinks, and build output. Open files with their default application. Recent documents are included even when outside that index. Supported raster images display thumbnails decoded by a single background worker, with a bounded in-memory cache; files over 16 MiB or 16 million pixels keep their file icon.
+- The built-in Guide has 78 topics covering every app feature, with instructions, example commands, shortcuts, and requirements. Press F1, search `guide` or `walkthrough`, or open Settings → Guide. The searchable topic menu jumps directly to a feature; Back and Next browse the catalog. Example buttons open a view or prepare a search for you to review. The guide remembers the current topic during the session, and Start searching returns to the launcher from any topic.
+- **Search File** stays pinned below the main search box alongside **Recent**, above the scrolling results. Choose it to search by filename or path; it carries over text already typed in main search. File indexing starts when this view opens. Full paths appear under results. Bounded to 25,000 entries, six directory levels, excluding hidden files, symlinks, and build output. Home file search and Recent also respect `~/.spotlightignore` using gitignore patterns (examples below); ignored directories are pruned before indexing. Open files with their default application. Recent documents are included even when outside that index. Supported raster images display thumbnails decoded by a single background worker, with a bounded in-memory cache; files over 16 MiB or 16 million pixels keep their file icon.
 - **Recent** opens a separate, searchable view of recently opened files and folders, newest first. Explicit commands `recent`, `recent files`, `recent folders`, and `recent report` also remain available. Reads the real XDG `recently-used.xbel` history and KDE `RecentDocuments` entries and includes recently used parent folders. Dotfiles, files inside hidden folders (such as `.config`), missing files, remote locations, and XDG private entries are excluded. History refreshes when Spotlight or the Recent view opens; Ctrl+R refreshes it. Visible files opened through Spotlight are registered with GTK's standard recent manager.
 - Content search: `rg rust` or `content rust` searches inside home-folder files; `in: notes rust`, `in: ~/Projects TODO`, or `in: "Documents/My Notes" phrase`. `notes` searches Spotlight's local Quick Notes, an attached Obsidian vault, `~/Notes`, and `~/Documents/Notes`; other scopes are folders relative to home, `~/...`, or absolute paths. Uses `rg` (ripgrep) with literal text and smart case. Matches stream into the launcher after a 120 ms typing delay, with 40 ms UI polling; changing the query or hiding Spotlight cancels and reaps the old scan. Results show a filename, line number, and matching excerpt; Enter opens an inline preview with an Open in App button. Respects ripgrep's normal hidden-file, ignore, binary, and symlink rules, excludes common build folders, limits files to 1 MiB and depth to 12, and stops after eight seconds or 100 matches. Long-line previews are capped at 4,096 characters. Requires ripgrep on PATH.
 - Calculator: arithmetic, parentheses, powers, percentages, `pi`, `e`, `sqrt`, trigonometry (radians), `ln`, `log`, `abs`, and `round`.
 - Unit conversion: `10 km to mi`, `32 f to c`, `2 kg to lb`, `1 gib to mib`. Supports common unit names, volume, area, speed, and temperature symbols. Natural-language date calculations are not implemented.
 - Currency conversion in the main search: `100 USD to AUD` or `50 eur in gbp`. Fetches the latest daily rates from [Frankfurter](https://frankfurter.dev/), shows the rate date, and copies with Enter. Requires internet and `curl`; rates are cached in memory for 15 minutes. These are reference rates, not tick-by-tick prices.
-- Clipboard text and images through KDE Klipper: up to 60 text entries (64 KiB each), plus up to 24 images from its version-3 history database. Current clipboard images also work without saved Klipper history. Image rows show thumbnails; Enter copies the image, and Ctrl+K → Preview Image opens a larger view. Paste with Ctrl+V in your target app. Spotlight reads images only when you open Clipboard History and does not keep another clipboard archive.
+- Clipboard text and images through KDE Klipper: up to 60 text entries (64 KiB each), plus up to 24 images from its version-3 history database. Current clipboard images also work without saved Klipper history. Image rows show thumbnails; Enter copies the image, and Ctrl+K → Preview Image opens a larger view. Paste with Ctrl+V in your target app. Spotlight reads images when Clipboard History opens. Explicitly pinned text and image copies save privately in Spotlight; other history stays in Klipper.
 - Quick note capture from any app: press Meta+Space, type `note your text`, and press Enter. Search `Quick Note` for a multiline box; Ctrl+Enter saves, Escape keeps the draft in memory until Spotlight quits. “Save & Open” opens the saved note. Spotlight automatically connects when exactly one existing Obsidian vault is detected. Markdown notes save inside `Spotlight Quick Notes` in that vault, appear in main search, and open in Obsidian. Manage the connection or choose local-only capture in Settings. Vault notes are written directly as files, so Obsidian does not need to be running. `spotlight --quick-note` opens the capture box directly.
 - Dictionary: type `define serendipity`, `dict word`, or `dictionary word`. English definitions, parts of speech, pronunciation text, and examples appear inside Spotlight; Enter copies a definition. Uses the [Free Dictionary API](https://dictionaryapi.dev/) over HTTPS, with a typing delay and one-hour session cache. Requires internet and `curl`; Ctrl+R retries a failed lookup.
 - Offline translation: `translate en es cat`, `translate es en gato`, or `offline word` searches local dictd dictionaries and previews definitions inside Spotlight. `dictionaries` lists installed file dictionaries. Supports compressed FreeDict data and a local-only DICT server; no AI or internet lookup. This translates dictionary headwords, rather than arbitrary sentences. See [offline dictionary setup](docs/OFFLINE.md).
@@ -95,7 +119,8 @@ Account calendars use the configured GNOME Calendar/Evolution service. **Spotlig
 | Enter | Open, copy, or run |
 | Ctrl+Enter | Search Google from the main search bar |
 | Escape | Back to search, then hide |
-| Ctrl+K | Actions menu |
+| Tab / Ctrl+K | Actions menu (Tab expands a matching snippet trigger first) |
+| Shift+Tab | Navigate controls backwards |
 | Ctrl+F | Toggle favorite |
 | Ctrl+N | Create snippet, note, or quicklink |
 | Ctrl+E | Edit selected item |
@@ -107,7 +132,7 @@ WASM plugins run in the Wasmi Rust sandbox with no filesystem, network, or proce
 
 ## Data and resource use
 
-Data uses `$XDG_DATA_HOME/spotlight` or `~/.local/share/spotlight`, with private directory and file permissions. New installations start with empty notes, snippets, quicklinks, favorites, and usage history. No personal data is bundled or migrated from earlier app names. Runtime data, local scripts, private configuration, and generated desktop screenshots are excluded from Git. File indexing is lazy and runs in a worker thread; hidden panels do not continually poll for files. The reminder clock runs once per second only while timers or alarms are active. The installed launcher uses GTK's Cairo renderer to avoid allocating a GPU context. Clipboard history stays in Klipper. Currency queries send only the source and target currency codes to Frankfurter over HTTPS, after a short typing delay. Amounts stay local. Dictionary queries send the requested word or phrase to the Free Dictionary API. Process, repository, and container discovery runs in background workers on explicit queries. Enabled desktop snippet expansion exports snippet text to a private (0600) local Espanso match file. Other calculations and unit conversions work offline; opening links or web search delegates to your browser.
+Data uses `$XDG_DATA_HOME/spotlight` or `~/.local/share/spotlight`, with private directory and file permissions. New installations start with empty notes, snippets, quicklinks, favorites, and usage history. No personal data is bundled or migrated from earlier app names. Runtime data, local scripts, private configuration, and personal desktop captures are excluded from Git. README screenshots use isolated demo data. File indexing is lazy and runs in a worker thread; hidden panels do not continually poll for files. The reminder clock runs once per second only while timers or alarms are active. The installed launcher uses GTK's Cairo renderer to avoid allocating a GPU context. Clipboard history stays in Klipper; explicitly pinned entries save in Spotlight. Public IP queries contact ipify, and tab searches contact only the configured loopback browser endpoint. QR generation and OCR stay local. Currency queries send only the source and target currency codes to Frankfurter over HTTPS, after a short typing delay. Amounts stay local. Dictionary queries send the requested word or phrase to the Free Dictionary API. Process, repository, and container discovery runs in background workers on explicit queries. Enabled desktop snippet expansion exports snippet text to a private (0600) local Espanso match file. Other calculations and unit conversions work offline; opening links or web search delegates to your browser.
 
 This is an independent implementation of the launcher workflow, not a Raycast port. Raycast's extension API/store, AI services, cloud sync, and full feature parity are not implemented.
 
@@ -125,7 +150,9 @@ On KDE, `spotlight --smoke-test --screen-tools-smoke-test` checks ruler gestures
 
 `python3 tests/interface_smoke.py` exercises Compact/Expanded resizing, interface size persistence, reset, Settings hover rendering, and the scroll-border regression using disposable preferences.
 
-`python3 tests/guide_smoke.py` checks all 46 guide topics, topic menu search, direct navigation, remembered position, calendar and Recent examples, Settings links, and completion with isolated data. Previews are written to `/tmp/spotlight-guide-{overview,calendar,topics}.png`.
+`python3 tests/guide_smoke.py` checks all 78 guide topics, topic menu search, direct navigation, remembered position, calendar and Recent examples, Settings links, and completion with isolated data. Previews are written to `/tmp/spotlight-guide-{overview,calendar,topics}.png`.
+
+`/usr/bin/python3 tests/folder_open_smoke.py` checks Search File, Recent, and Settings folders with a terminal configured as the default directory handler. A private D-Bus and fixture apps verify file-manager routing, fallback, URI escaping, recent registration, and normal document defaults without changing your desktop associations.
 
 `spotlight --smoke-test --scroll-smoke-test` checks rendered search and Settings content while scrolling down and back up, including a pixel check for stray horizontal borders. Use a temporary `XDG_DATA_HOME` in a desktop session.
 
@@ -143,4 +170,31 @@ For the developer tools and snippet workflow, run `python3 tests/boosters_smoke.
 
 ## Uninstall
 
-Remove `~/.local/bin/spotlight`, `~/.local/lib/spotlight`, `~/.local/share/applications/spotlight.desktop`, `~/.local/share/kglobalaccel/spotlight.desktop`, and `~/.local/share/icons/hicolor/scalable/apps/spotlight.svg`. Remove its shortcut in KDE System Settings → Keyboard → Shortcuts. Your data is retained under `~/.local/share/spotlight` until you remove it yourself.
+Run `spotlight --no-autostart` if you enabled login startup. Remove `~/.local/bin/spotlight`, `~/.local/lib/spotlight`, `~/.local/share/applications/spotlight.desktop`, `~/.local/share/kglobalaccel/spotlight.desktop`, and `~/.local/share/icons/hicolor/scalable/apps/spotlight.svg`. Remove its shortcut in KDE System Settings → Keyboard → Shortcuts. Your data is retained under `~/.local/share/spotlight` until you remove it yourself.
+
+## File exclusions
+
+Create `~/.spotlightignore` with home-relative gitignore rules:
+
+```gitignore
+# Keep private folders and large caches out of file search and Recent
+/Private/
+/Downloads/archive/
+*.log
+**/cache/
+!important.log
+```
+
+`/` anchors a pattern to home; directory patterns end in `/`. `!` re-includes a matching file when its parent directory is still included. Hidden files, symlinks, and the built-in build-directory exclusions remain excluded. Press **Ctrl+R** in Search File or Recent after editing the rules. Invalid rules show an error. These rules govern filename search and recent documents; ripgrep content search retains its own ignore rules.
+
+## Development checks
+
+GitHub Actions checks formatting, Clippy (all targets, warnings fail), and unit tests on Ubuntu 24.04. Run the same checks locally:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+```
+
+On a Linux desktop, build the release binary and run `python3 tests/usability_smoke.py` to verify the actions keys, snippet priority, home exclusions, and autostart lifecycle. It uses an isolated home directory and D-Bus session, and regenerates the README screenshots from demo data.

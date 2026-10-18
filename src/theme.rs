@@ -347,8 +347,10 @@ mod tests {
                 .theme,
             Theme::default()
         );
-        let mut invalid = Theme::default();
-        invalid.accent = "red; } window { background: white".into();
+        let invalid = Theme {
+            accent: "red; } window { background: white".into(),
+            ..Theme::default()
+        };
         assert!(invalid.css().is_err());
         assert_eq!(contrast([255; 3]), "#15151C");
         assert_eq!(contrast([0; 3]), "#FFFFFF");

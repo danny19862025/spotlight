@@ -11,6 +11,9 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Query {
+    Productivity(crate::productivity::Query),
+    Dev(crate::devtools::Query),
+    Advanced(crate::advanced::Query),
     Offline(crate::offline::Query),
     Windows(String),
     Desktops(String),
@@ -26,6 +29,15 @@ pub enum Query {
 }
 impl Query {
     pub fn parse(text: &str) -> Option<Self> {
+        if let Some(query) = crate::productivity::Query::parse(text) {
+            return Some(Self::Productivity(query));
+        }
+        if let Some(query) = crate::devtools::Query::parse(text) {
+            return Some(Self::Dev(query));
+        }
+        if let Some(query) = crate::advanced::Query::parse(text) {
+            return Some(Self::Advanced(query));
+        }
         if let Some(query) = crate::offline::parse(text) {
             return Some(Self::Offline(query));
         }
@@ -86,6 +98,9 @@ impl Query {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
+    Productivity(crate::productivity::Operation),
+    Dev(crate::devtools::Operation),
+    Advanced(crate::advanced::Operation),
     Query(String),
     FocusWindow(String),
     SwitchDesktop(String),
@@ -117,7 +132,7 @@ pub struct Entry {
     pub badge: &'static str,
     pub operation: Option<Operation>,
 }
-fn entry(
+pub(crate) fn entry(
     title: impl Into<String>,
     detail: impl Into<String>,
     badge: &'static str,
@@ -222,6 +237,9 @@ pub fn run_input(
 
 pub fn fetch(query: &Query) -> Result<Vec<Entry>, String> {
     match query {
+        Query::Productivity(query) => crate::productivity::fetch(query),
+        Query::Dev(query) => crate::devtools::fetch(query),
+        Query::Advanced(query) => crate::advanced::fetch(query),
         Query::Offline(query) => crate::offline::fetch(query),
         Query::Windows(query) => crate::windowing::fetch(query),
         Query::Desktops(query) => crate::windowing::fetch_desktops(query),
@@ -603,33 +621,13 @@ fn decode_definitions(word: &str, output: &str) -> Result<Vec<Entry>, String> {
 
 pub fn execute(operation: Operation) -> Result<String, String> {
     match operation {
+        Operation::Productivity(_) => Err("This command must be opened in Spotlight".into()),
+        Operation::Dev(operation) => crate::devtools::execute(operation),
+        Operation::Advanced(operation) => crate::advanced::execute(operation),
         Operation::FocusWindow(id) => crate::windowing::focus(&id),
         Operation::SwitchDesktop(id) => crate::windowing::switch_desktop(&id),
         Operation::Terminate { pid, started } => {
-            if pid <= 1 || pid == std::process::id() || process_identity(pid)? != started {
-                return Err("Process changed or exited; search again".into());
-            }
-            let uid = fs::metadata("/proc/self").map_err(|e| e.to_string())?.uid();
-            if fs::metadata(format!("/proc/{pid}"))
-                .map_err(|e| e.to_string())?
-                .uid()
-                != uid
-            {
-                return Err("Only your own processes can be terminated".into());
-            }
-            // A pidfd pins the selected process, avoiding PID reuse between validation and SIGTERM.
-            let fd = unsafe { pidfd_open(pid as i32, 0) };
-            if fd < 0 {
-                return Err(std::io::Error::last_os_error().to_string());
-            }
-            let valid = process_identity(pid).is_ok_and(|s| s == started);
-            let sent = valid && unsafe { pidfd_send_signal(fd, 15, std::ptr::null(), 0) } == 0;
-            unsafe {
-                close(fd);
-            }
-            if !sent {
-                return Err("Process exited or could not be terminated; search again".into());
-            }
+            signal_process(pid, started, 15)?;
             Ok(format!("Sent SIGTERM to PID {pid}"))
         }
         Operation::ViewRepo(path) => {
@@ -690,6 +688,37 @@ pub fn execute(operation: Operation) -> Result<String, String> {
             ))
         }
         _ => Err("This operation belongs in the launcher UI".into()),
+    }
+}
+pub fn signal_process(pid: u32, started: u64, signal: i32) -> Result<(), String> {
+    if !matches!(signal, 9 | 15)
+        || pid <= 1
+        || pid == std::process::id()
+        || process_identity(pid)? != started
+    {
+        return Err("Process changed or exited; search again".into());
+    }
+    let uid = fs::metadata("/proc/self").map_err(|e| e.to_string())?.uid();
+    if fs::metadata(format!("/proc/{pid}"))
+        .map_err(|e| e.to_string())?
+        .uid()
+        != uid
+    {
+        return Err("Only your own processes can be terminated".into());
+    }
+    let fd = unsafe { pidfd_open(pid as i32, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let valid = process_identity(pid).is_ok_and(|s| s == started);
+    let sent = valid && unsafe { pidfd_send_signal(fd, signal, std::ptr::null(), 0) } == 0;
+    unsafe {
+        close(fd);
+    }
+    if sent {
+        Ok(())
+    } else {
+        Err("Process exited or could not be terminated; search again".into())
     }
 }
 unsafe extern "C" {

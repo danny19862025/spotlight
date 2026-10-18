@@ -169,7 +169,7 @@ The installer creates these files for your user:
 "$HOME/.local/bin/spotlight"
 ```
 
-You can also search for **Spotlight** in your applications menu. The first launch stays running; launching it again toggles the panel. Escape hides it. Use **Quit Spotlight** to exit. Login autostart is not installed automatically.
+You can also search for **Spotlight** in your applications menu. The first launch stays running; launching it again toggles the panel. Escape hides it. Use **Quit Spotlight** to exit. Login autostart is opt-in. Run `"$HOME/.local/bin/spotlight" --autostart` to create `$XDG_CONFIG_HOME/autostart/spotlight.desktop` (or `~/.config/autostart/spotlight.desktop`). It starts the launcher hidden, ready for your shortcut. Use `--no-autostart` to remove the managed entry. You can also opt in during installation with `sh install.sh --autostart`. Existing unrelated entries are preserved.
 
 On **KDE Plasma**, register Meta+Space with:
 
@@ -249,6 +249,8 @@ cargo test --locked --offline
 ```
 
 ## Uninstall
+
+If enabled, remove login startup first with `"$HOME/.local/bin/spotlight" --no-autostart`.
 
 Quit Spotlight, then remove only its installed program files:
 

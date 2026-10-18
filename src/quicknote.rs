@@ -72,10 +72,10 @@ pub fn query(text: &str) -> Option<&str> {
         if lower == prefix {
             return Some("");
         }
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            if rest.starts_with(char::is_whitespace) {
-                return Some(text[prefix.len()..].trim());
-            }
+        if let Some(rest) = lower.strip_prefix(prefix)
+            && rest.starts_with(char::is_whitespace)
+        {
+            return Some(text[prefix.len()..].trim());
         }
     }
     None

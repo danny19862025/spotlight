@@ -1,14 +1,27 @@
 #!/bin/sh
 set -eu
+autostart=false
+case "${1-}" in
+    '') ;;
+    --autostart) autostart=true ;;
+    *) printf 'Usage: sh install.sh [--autostart]\n' >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { printf 'Usage: sh install.sh [--autostart]\n' >&2; exit 2; }
 cd "$(dirname "$0")"
 cargo build --release --locked --offline
 mkdir -p "$HOME/.local/bin" "$HOME/.local/lib/spotlight" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
 install -m 755 target/release/spotlight "$HOME/.local/lib/spotlight/spotlight"
+install -m 644 docs/community-plugins.toml "$HOME/.local/lib/spotlight/community-plugins.toml"
+if pkg-config --exists Qt6Core libical; then
+    sh native/build-freebusy.sh
+    install -m 755 target/native/spotlight-freebusy "$HOME/.local/lib/spotlight/spotlight-freebusy"
+fi
 if [ -f /usr/include/KPim6/AkonadiCore/Akonadi/ItemFetchJob ]; then
     sh native/build-pim.sh
     install -m 755 target/native/spotlight-pim "$HOME/.local/lib/spotlight/spotlight-pim"
 fi
 install -m 644 assets/UNICODE-LICENSE.txt "$HOME/.local/lib/spotlight/UNICODE-LICENSE.txt"
+install -m 644 assets/QRCODEGEN-LICENSE.txt "$HOME/.local/lib/spotlight/QRCODEGEN-LICENSE.txt"
 install -m 644 assets/spotlight.svg "$HOME/.local/share/icons/hicolor/scalable/apps/spotlight.svg"
 cat > "$HOME/.local/bin/spotlight" <<'EOF'
 #!/bin/sh
@@ -31,3 +44,7 @@ StartupWMClass=local.spotlight.Spotlight
 X-KDE-Shortcuts=Meta+Space
 EOF
 printf 'Installed Spotlight. Launch with %s/.local/bin/spotlight\n' "$HOME"
+
+if [ "$autostart" = true ]; then
+    "$HOME/.local/bin/spotlight" --autostart
+fi

@@ -170,7 +170,7 @@ fn content(roots: &[PathBuf], text: &str) -> Result<Vec<Entry>, String> {
     content_stream(roots, text, &AtomicBool::new(false), &mut |_| {})
 }
 pub enum Update {
-    Match(Entry),
+    Match(Box<Entry>),
     Done(Result<Vec<Entry>, String>),
 }
 pub fn stream(query: &Query, cancel: Arc<AtomicBool>, updates: mpsc::Sender<Update>) {
@@ -188,7 +188,7 @@ pub fn stream(query: &Query, cancel: Arc<AtomicBool>, updates: mpsc::Sender<Upda
             return Err("Search cancelled".into());
         }
         content_stream(&roots(scope)?, text, &cancel, &mut |row| {
-            let _ = updates.send(Update::Match(row));
+            let _ = updates.send(Update::Match(Box::new(row)));
         })
     })();
     let _ = updates.send(Update::Done(result));
@@ -322,6 +322,7 @@ fn content_row(v: &serde_json::Value) -> Option<Entry> {
 
 // Use GLib's XBEL parser rather than trying to parse XML with string matching.
 pub fn recent() -> Result<Vec<(PathBuf, i64)>, String> {
+    let rules = crate::fileignore::Rules::load(&core::home())?;
     let dir = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| core::home().join(".local/share"));
@@ -361,7 +362,10 @@ pub fn recent() -> Result<Vec<(PathBuf, i64)>, String> {
             add_recent(&mut entries, path, time);
         }
     }
-    let mut entries: Vec<_> = entries.into_iter().collect();
+    let mut entries: Vec<_> = entries
+        .into_iter()
+        .filter(|(path, _)| !rules.excludes(path, path.is_dir()))
+        .collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     entries.truncate(300);
     Ok(entries)

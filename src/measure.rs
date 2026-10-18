@@ -192,9 +192,7 @@ pub fn open(parent: &gtk::ApplicationWindow, image: Pixbuf) -> Ruler {
         let label = readout.clone();
         let copy_button = copy.clone();
         drag.connect_local(signal, false, move |args| {
-            let Some(area) = weak_area.upgrade() else {
-                return None;
-            };
+            let area = weak_area.upgrade()?;
             let (Some((start, _)), Ok(dx), Ok(dy)) =
                 (selection.get(), args[1].get::<f64>(), args[2].get::<f64>())
             else {

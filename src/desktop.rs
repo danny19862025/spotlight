@@ -341,12 +341,11 @@ fn ini<'a>(text: &'a str, section: &str, key: &str) -> Option<&'a str> {
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
             current = line;
-        } else if current == format!("[{section}]") {
-            if let Some((name, value)) = line.split_once('=') {
-                if name.trim() == key {
-                    return Some(value.trim());
-                }
-            }
+        } else if current == format!("[{section}]")
+            && let Some((name, value)) = line.split_once('=')
+            && name.trim() == key
+        {
+            return Some(value.trim());
         }
     }
     None

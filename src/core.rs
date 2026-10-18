@@ -43,6 +43,9 @@ pub struct Store {
     pub desktop_snippets: bool,
     pub emoji_skin_tone: Option<u8>,
     pub emoji_tones: HashMap<String, u8>,
+    pub pinned_clips: Vec<crate::clipboard::Pinned>,
+    pub project_context: Option<PathBuf>,
+    pub commands: crate::customization::Preferences,
 }
 impl Store {
     pub fn load() -> Result<Self, String> {
@@ -337,9 +340,13 @@ pub fn hidden_path(path: &Path) -> bool {
     )
 }
 
-pub fn index_files() -> Vec<PathBuf> {
+pub fn index_files() -> Result<Vec<PathBuf>, String> {
+    index_files_in(&home())
+}
+pub(crate) fn index_files_in(root: &Path) -> Result<Vec<PathBuf>, String> {
+    let rules = crate::fileignore::Rules::load(root)?;
     let mut out = Vec::new();
-    let mut pending = vec![(home(), 0u8)];
+    let mut pending = vec![(root.to_path_buf(), 0u8)];
     while let Some((dir, depth)) = pending.pop() {
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
@@ -353,19 +360,19 @@ pub fn index_files() -> Vec<PathBuf> {
                 continue;
             }
             let Ok(ty) = entry.file_type() else { continue };
-            if ty.is_symlink() {
+            if ty.is_symlink() || rules.excludes(&entry.path(), ty.is_dir()) {
                 continue;
             }
             out.push(entry.path());
             if out.len() >= 25000 {
-                return out;
+                return Ok(out);
             }
             if ty.is_dir() && depth < 5 {
                 pending.push((entry.path(), depth + 1));
             }
         }
     }
-    out
+    Ok(out)
 }
 pub fn encode(text: &str) -> String {
     text.bytes()

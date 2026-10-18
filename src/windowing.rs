@@ -17,6 +17,8 @@ pub struct Window {
     pub title: String,
     pub app: String,
     #[serde(default)]
+    pub pid: u32,
+    #[serde(default)]
     pub active: bool,
     #[serde(default)]
     pub minimized: bool,
@@ -38,6 +40,7 @@ enum Request<'a> {
     Desktops,
     FocusWindow { id: &'a str },
     SwitchDesktop { id: &'a str },
+    CloseWindow { id: &'a str, pid: u32, all: bool },
 }
 type Replies = Mutex<HashMap<String, mpsc::Sender<String>>>;
 static REPLIES: OnceLock<Replies> = OnceLock::new();
@@ -183,7 +186,14 @@ fn script(service: &str, token: &str, request: &Request<'_>) -> String {
 function reply(value) {{ callDBus({service}, '/local/spotlight/Windows', 'local.spotlight.Windows', 'Result', {token}, JSON.stringify(value)); }}
 try {{
 const windows = workspace.windowList(); const request = {request};
-const normal = windows.filter(w => !w.deleted && !w.specialWindow && !w.skipTaskbar && !w.skipSwitcher && w.normalWindow && ['local.spotlight.spotlight','local.spotlight.smoke','spotlight'].indexOf(String(w.resourceClass).toLowerCase()) < 0);
+const normal = windows.filter(w => !w.deleted && !w.specialWindow && !w.skipTaskbar && !w.skipSwitcher && w.normalWindow && !['local.spotlight.spotlight','local.spotlight.smoke','local.spotlight.features.test','spotlight'].some(name => String(w.resourceClass).toLowerCase() === name || String(w.resourceClass).toLowerCase().startsWith(name + '.')));
+if (request.kind === 'close_window') {{
+ const w = normal.find(w => String(w.internalId) === request.id);
+ if (!w || (request.pid > 0 && Number(w.pid) !== request.pid)) {{ reply({{error:'That window has closed or changed'}}); return; }}
+ if (request.all && request.pid <= 1) {{ reply({{error:'Cannot identify this application process'}}); return; }}
+ const targets = request.all ? normal.filter(t => Number(t.pid) === request.pid) : [w];
+ targets.forEach(t => t.closeWindow()); reply({{closed:targets.length}}); return;
+}}
 if (request.kind === 'desktops') {{
  reply(workspace.desktops.map((d,i) => ({{id:String(d.id),name:String(d.name),number:i+1,current:d===workspace.currentDesktop,windows:normal.filter(w => !w.desktops.length || w.desktops.indexOf(d)>=0).length}}))); return;
 }}
@@ -203,7 +213,7 @@ if (request.kind === 'focus_window') {{
  if (typeof workspace.activateWindow === 'function') workspace.activateWindow(w); else workspace.activeWindow = w;
  reply({{focused: String(workspace.activeWindow && workspace.activeWindow.internalId) === target}}); return;
 }}
-reply(normal.slice(0,200).map(w => ({{id:String(w.internalId),title:String(w.caption),app:String(w.desktopFileName || w.resourceClass),active:!!w.active,minimized:!!w.minimized,desktops:w.desktops.map(d => String(d.name))}})));
+reply(normal.slice(0,200).map(w => ({{id:String(w.internalId),title:String(w.caption),app:String(w.desktopFileName || w.resourceClass),pid:Number(w.pid)||0,active:!!w.active,minimized:!!w.minimized,desktops:w.desktops.map(d => String(d.name))}})));
 }} catch(e) {{ reply({{error:String(e)}}); }}
 }})();"#
     )
@@ -283,6 +293,27 @@ pub fn focus(id: &str) -> Result<String, String> {
         Err(response["error"]
             .as_str()
             .unwrap_or("KWin could not activate that window")
+            .into())
+    }
+}
+pub fn close_window(id: &str, pid: u32, all: bool) -> Result<String, String> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || "{}-".contains(c))
+    {
+        return Err("Invalid window identity".into());
+    }
+    let response: serde_json::Value =
+        serde_json::from_str(&request(Request::CloseWindow { id, pid, all })?)
+            .map_err(|_| "Invalid KWin close response")?;
+    if let Some(count) = response["closed"].as_u64() {
+        Ok(format!("Requested a normal close for {count} window(s)"))
+    } else {
+        Err(response["error"]
+            .as_str()
+            .unwrap_or("KWin could not close that window")
             .into())
     }
 }

@@ -151,6 +151,9 @@ pub fn discover() -> (Vec<Manifest>, Vec<String>) {
 pub fn discover_at(root: &Path) -> (Vec<Manifest>, Vec<String>) {
     let mut files = Vec::new();
     for e in fs::read_dir(root).into_iter().flatten().flatten().take(256) {
+        if e.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let path = e.path();
         if e.file_type().is_ok_and(|t| t.is_dir()) {
             let path = path.join("manifest.json");
@@ -407,8 +410,8 @@ fn run_inner(
         return Err("Extension cancelled".into());
     }
     let mut command;
-    let input;
-    if manifest.runtime == Runtime::Wasm {
+
+    let input = if manifest.runtime == Runtime::Wasm {
         command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
         command
             .arg("--wasm-plugin-worker")
@@ -427,7 +430,7 @@ fn run_inner(
                 Ok(())
             });
         }
-        input = Some(serde_json::to_vec(&serde_json::json!({"api_version":1,"query":if manifest.mode == Mode::Search {args.first().map(String::as_str).unwrap_or("")} else {""},"args":args})).map_err(|e| e.to_string())?);
+        Some(serde_json::to_vec(&serde_json::json!({"api_version":1,"query":if manifest.mode == Mode::Search {args.first().map(String::as_str).unwrap_or("")} else {""},"args":args})).map_err(|e| e.to_string())?)
     } else {
         let exe = &manifest.command[0];
         let program = if !Path::new(exe).is_absolute() && exe.contains('/') {
@@ -449,8 +452,8 @@ fn run_inner(
                     ""
                 },
             );
-        input = None;
-    }
+        None
+    };
     let mut child = command
         .stdin(if input.is_some() {
             Stdio::piped()

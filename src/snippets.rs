@@ -44,6 +44,77 @@ pub fn expansion<'a>(prefix: &str, snippets: &'a [TextItem]) -> Option<(usize, &
         })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Rendered {
+    pub text: String,
+    /// Character offset of the first cursor marker, for GTK's Unicode offsets.
+    pub cursor: Option<usize>,
+}
+
+pub fn render(template: &str, clipboard: &str) -> Rendered {
+    let mut text = String::new();
+    let mut cursor = None;
+    let mut rest = template;
+    while let Some((at, marker)) = next_marker(rest) {
+        text.push_str(&rest[..at]);
+        if marker == "{cursor}" {
+            cursor.get_or_insert_with(|| text.chars().count());
+        } else {
+            text.push_str(clipboard);
+        }
+        rest = &rest[at + marker.len()..];
+    }
+    text.push_str(rest);
+    Rendered { text, cursor }
+}
+
+fn next_marker(text: &str) -> Option<(usize, &'static str)> {
+    ["{cursor}", "{clipboard}"]
+        .into_iter()
+        .filter_map(|marker| text.find(marker).map(|at| (at, marker)))
+        .min_by_key(|(at, _)| *at)
+}
+
+fn espanso_match(s: &TextItem) -> serde_json::Value {
+    let mut vars = vec![
+        json!({"name":"spotlight_content", "type":"echo", "inject_vars":false, "params":{"echo":s.value}}),
+    ];
+    let mut replacement = "{{spotlight_content}}".to_string();
+    if next_marker(&s.value).is_some() {
+        vars.clear();
+        replacement.clear();
+        let mut rest = s.value.as_str();
+        let mut cursor = false;
+        let mut clipboard = false;
+        loop {
+            let marker = next_marker(rest);
+            let literal = marker.map(|(at, _)| &rest[..at]).unwrap_or(rest);
+            if !literal.is_empty() {
+                let name = format!("spotlight_literal_{}", vars.len());
+                vars.push(json!({"name":name,"type":"echo","inject_vars":false,"params":{"echo":literal}}));
+                replacement.push_str(&format!("{{{{{name}}}}}"));
+            }
+            let Some((at, marker)) = marker else {
+                break;
+            };
+            if marker == "{cursor}" {
+                if !cursor {
+                    replacement.push_str("$|$");
+                    cursor = true;
+                }
+            } else {
+                if !clipboard {
+                    vars.push(json!({"name":"spotlight_clipboard","type":"clipboard"}));
+                    clipboard = true;
+                }
+                replacement.push_str("{{spotlight_clipboard}}");
+            }
+            rest = &rest[at + marker.len()..];
+        }
+    }
+    json!({"trigger":s.trigger,"word":true,"replace":replacement,"label":s.name,"vars":vars})
+}
+
 pub fn config_path() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -55,15 +126,7 @@ pub fn config(snippets: &[TextItem], enabled: bool) -> String {
     let matches: Vec<_> = snippets
         .iter()
         .filter(|s| enabled && !s.trigger.is_empty())
-        .map(|s| {
-            json!({
-                "trigger": s.trigger,
-                "word": true,
-                "replace": "{{spotlight_content}}",
-                "label": s.name,
-        "vars": [{"name": "spotlight_content", "type": "echo", "inject_vars": false, "params": {"echo": s.value}}]
-            })
-        })
+        .map(espanso_match)
         .collect();
     format!(
         "# Managed by Spotlight · edit snippets in the launcher\n{}\n",
@@ -160,5 +223,36 @@ mod tests {
             "# personal configuration"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn placeholders_unicode_and_literal_clipboard() {
+        let rendered = render(
+            "é {clipboard} [{cursor}] {cursor}",
+            "{{code}} {cursor} {clipboard}",
+        );
+        assert_eq!(rendered.text, "é {{code}} {cursor} {clipboard} [] ");
+        assert_eq!(
+            rendered.cursor,
+            Some("é {{code}} {cursor} {clipboard} [".chars().count())
+        );
+        assert_eq!(
+            render("plain {{braces}}", ""),
+            Rendered {
+                text: "plain {{braces}}".into(),
+                cursor: None
+            }
+        );
+        let mut s = snippet();
+        s.value = "{{code}} {clipboard} [{cursor}] {cursor}".into();
+        let json = espanso_match(&s);
+        assert_eq!(json["replace"].as_str().unwrap().matches("$|$").count(), 1);
+        let vars = json["vars"].as_array().unwrap();
+        assert_eq!(vars.iter().filter(|v| v["type"] == "clipboard").count(), 1);
+        assert!(
+            vars.iter()
+                .filter(|v| v["type"] == "echo")
+                .all(|v| v["inject_vars"] == false)
+        );
+        assert_eq!(vars[0]["params"]["echo"], "{{code}} ");
     }
 }

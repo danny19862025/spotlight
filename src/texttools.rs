@@ -8,6 +8,9 @@ pub enum Query {
     Hash(String),
     Base64(String),
     Tldr(String),
+    Lorem(String),
+    Case(String),
+    Json(String),
 }
 impl Query {
     pub fn parse(head: &str, tail: &str) -> Option<Self> {
@@ -16,6 +19,9 @@ impl Query {
             "hash" => Self::Hash(tail.into()),
             "base64" => Self::Base64(tail.into()),
             "tldr" | "cheat" => Self::Tldr(tail.into()),
+            "lorem" => Self::Lorem(tail.into()),
+            "case" => Self::Case(tail.into()),
+            "json" => Self::Json(tail.into()),
             _ => return None,
         })
     }
@@ -121,7 +127,127 @@ pub fn fetch(query: &Query) -> Result<Vec<Entry>, String> {
             }
         }
         Query::Tldr(command) => return cheat(command),
+        Query::Lorem(count) => {
+            let count = if count.is_empty() {
+                1
+            } else {
+                count
+                    .parse::<usize>()
+                    .map_err(|_| "Use lorem 5 for five paragraphs")?
+            };
+            if !(1..=20).contains(&count) {
+                return Err("Choose 1 to 20 paragraphs".into());
+            }
+            let paragraph = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.";
+            vec![copy(
+                vec![paragraph; count].join("\n\n"),
+                &format!("{count} paragraphs · Enter copies all text"),
+                "Lorem",
+            )]
+        }
+        Query::Case(value) => {
+            let (mode, value) = value.split_once(char::is_whitespace).unwrap_or((value, ""));
+            if value.is_empty() {
+                return Ok(vec![boosters::hint(
+                    "Convert text case",
+                    "case camel Hello world · case snake HTTPServer · case kebab Hello world · case upper/lower/title text",
+                )]);
+            }
+            let value = input(value)?;
+            if value.contains('\0') {
+                return Err("Case conversion text cannot contain a NUL byte".into());
+            }
+            let words = words(&value);
+            let transformed = match mode {
+                "camel" => words
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| if i == 0 { w.clone() } else { capitalized(w) })
+                    .collect::<String>(),
+                "snake" => words.join("_"),
+                "kebab" => words.join("-"),
+                "pascal" => words.iter().map(|w| capitalized(w)).collect::<String>(),
+                "upper" => value.to_uppercase(),
+                "lower" => value.to_lowercase(),
+                "title" => words
+                    .iter()
+                    .map(|w| capitalized(w))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => {
+                    return Err("Choose camel, snake, kebab, pascal, upper, lower, or title".into());
+                }
+            };
+            vec![copy(
+                transformed,
+                &format!("{mode} case · Enter copies"),
+                "Case",
+            )]
+        }
+        Query::Json(value) => {
+            let value = value
+                .strip_prefix("format")
+                .filter(|_| value == "format" || value.starts_with("format "))
+                .map(str::trim_start)
+                .unwrap_or(value);
+            if value.is_empty() {
+                return Ok(vec![boosters::hint(
+                    "Format JSON",
+                    "json format {\"name\":\"Spotlight\",\"ready\":true}",
+                )]);
+            }
+            if value.len() > 65536 {
+                return Err("JSON input is limited to 64 KiB".into());
+            }
+            let parsed: serde_json::Value =
+                serde_json::from_str(value).map_err(|e| format!("Invalid JSON: {e}"))?;
+            let formatted = serde_json::to_string_pretty(&parsed).map_err(|e| e.to_string())?;
+            vec![Entry {
+                title: "Formatted JSON".into(),
+                detail: "Enter opens a formatted preview · Copy All copies the result".into(),
+                badge: "JSON",
+                operation: Some(Operation::Preview {
+                    title: "Formatted JSON".into(),
+                    text: formatted,
+                    open: None,
+                }),
+            }]
+        }
     })
+}
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
+}
+fn words(value: &str) -> Vec<String> {
+    let chars: Vec<_> = value.chars().collect();
+    let mut result = Vec::new();
+    let mut word = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                result.push(std::mem::take(&mut word));
+            }
+            continue;
+        }
+        let previous = i.checked_sub(1).and_then(|i| chars.get(i)).copied();
+        let next = chars.get(i + 1).copied();
+        let boundary = c.is_uppercase()
+            && (previous.is_some_and(|p| p.is_lowercase() || p.is_numeric())
+                || previous.is_some_and(char::is_uppercase)
+                    && next.is_some_and(char::is_lowercase));
+        if boundary && !word.is_empty() {
+            result.push(std::mem::take(&mut word));
+        }
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        result.push(word);
+    }
+    result
 }
 const TAR: &str = "tar — common archive commands\n\nCreate a compressed archive:\n  tar -czf archive.tar.gz directory/\n\nList an archive before extracting:\n  tar -tf archive.tar.gz\n\nExtract into an existing directory:\n  tar -xf archive.tar.gz -C destination/\n\nCreate an uncompressed archive:\n  tar -cf archive.tar file1 file2\n\nExtract one member:\n  tar -xf archive.tar path/inside/archive\n\nInspect verbose file details:\n  tar -tvf archive.tar\n\nSpotlight's bundled cheat sheet. Commands are examples; they are never run by Spotlight.";
 fn cheat(command: &str) -> Result<Vec<Entry>, String> {
@@ -246,6 +372,46 @@ mod tests {
     use super::*;
     fn value(q: Query) -> String {
         fetch(&q).unwrap().remove(0).title
+    }
+    #[test]
+    fn case_boundaries_lorem_and_json_validation() {
+        assert_eq!(
+            value(Query::Case("snake HTTPServer URLValue caféTest".into())),
+            "http_server_url_value_café_test"
+        );
+        assert_eq!(
+            value(Query::Case("camel hello_world example".into())),
+            "helloWorldExample"
+        );
+        assert_eq!(
+            value(Query::Case("kebab Hello World".into())),
+            "hello-world"
+        );
+        assert_eq!(
+            value(Query::Case("pascal hello_world".into())),
+            "HelloWorld"
+        );
+        if let Some(Operation::Copy(text)) = &fetch(&Query::Lorem("5".into())).unwrap()[0].operation
+        {
+            assert_eq!(text.split("\n\n").count(), 5);
+        } else {
+            panic!("Lorem should copy all paragraphs");
+        }
+        assert!(fetch(&Query::Lorem("999999".into())).is_err());
+        assert!(fetch(&Query::Case("upper \"\\u0000\"".into())).is_err());
+        assert!(fetch(&Query::Json("format {bad}".into())).is_err());
+        let result = fetch(&Query::Json(
+            "format {\"unicode\":\"café\",\"ok\":true}".into(),
+        ))
+        .unwrap();
+        let Some(Operation::Preview { text, .. }) = &result[0].operation else {
+            panic!("JSON preview missing")
+        };
+        assert!(text.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(text).unwrap()["unicode"],
+            "café"
+        );
     }
     #[test]
     fn standard_vectors_and_strict_base64() {
