@@ -114,7 +114,7 @@ nix-shell -p gcc pkg-config gtk4 sqlite rustc cargo git curl gsettings-desktop-s
 
 Skip step 2 and run the shared build and launch commands **inside this shell**. Re-enter the same environment for future launches. See the official [Nix shell documentation](https://nix.dev/tutorials/first-steps/declarative-shell.html).
 
-This is a development-shell recipe. The project does not yet provide a Nix package with GTK runtime wrapping and garbage-collection roots for a permanent desktop installation. Menu launches outside the shell may need additional packaging and environment configuration.
+This is an alternative development-shell recipe. For permanent installation with GTK runtime wrapping, use the [Nix flake](NIX.md).
 
 ### Other distributions, including Slackware and Solus
 
