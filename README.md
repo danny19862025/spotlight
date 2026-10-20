@@ -52,6 +52,8 @@ On KDE, `layout save work` saves current window positions; `layout work` (or `la
 
 ## Build and install
 
+See [Linux packages](docs/PACKAGING.md) for Debian/Ubuntu `.deb`, Fedora/openSUSE `.rpm`, Arch PKGBUILD, and tarball build recipes. Native package releases are not published yet.
+
 **Nix/NixOS:** `nix profile install github:danny19862025/spotlight` installs the native launcher and its runtime dependencies. See the [Nix installation guide](docs/NIX.md) for flakes, declarative configuration, and optional-feature limits.
 
 Follow the **[Linux installation guide](docs/INSTALL.md)** for Ubuntu/Kubuntu and derivatives, Debian, Arch and derivatives, Fedora, Fedora Atomic, openSUSE, Void, Gentoo, Alpine, NixOS, and other distributions. It includes dependency commands, Rust setup, shortcuts, updates, troubleshooting, and uninstall instructions.

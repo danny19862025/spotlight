@@ -27,3 +27,10 @@ desktop-themes.tmp
 __pycache__/
 *~
 .DS_Store
+
+# Distribution packaging outputs
+/dist/
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/spotlight/
+/packaging/arch/*.pkg.tar.*

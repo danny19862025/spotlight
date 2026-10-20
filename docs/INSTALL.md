@@ -1,6 +1,6 @@
 # Installing Spotlight on Linux
 
-Spotlight is installed from source. Choose your distro below, install the dependencies, then follow the shared build steps. No prebuilt DEB, RPM, AppImage, Flatpak, or Snap is currently provided by this project.
+See [Linux packages](PACKAGING.md) for native Debian/Ubuntu, Fedora/openSUSE, and Arch packaging recipes, or [Nix installation](NIX.md). To install directly from source, choose your distro below and follow the shared build steps. Native package releases are not published yet; no AppImage, Flatpak, or Snap is provided.
 
 These instructions cover the main distro families and provide a general method for other distributions. The application has been checked on KDE Plasma with Wayland; the other distro recipes describe the required packages and have not all been tested on fresh installations.
 
