@@ -78,7 +78,7 @@ mod tests {
     fn folder_fallback_excludes_terminal_and_disk_tools() {
         let app = |categories: &str, terminal: bool| {
             let key = glib::KeyFile::new();
-            key.load_from_data(&format!("[Desktop Entry]\nType=Application\nName=Fixture\nExec=/bin/true %U\nCategories={categories}\nTerminal={terminal}\n"), glib::KeyFileFlags::NONE).unwrap();
+            key.load_from_data(&format!("[Desktop Entry]\nType=Application\nName=Fixture\nExec=true %U\nCategories={categories}\nTerminal={terminal}\n"), glib::KeyFileFlags::NONE).unwrap();
             gio::DesktopAppInfo::from_keyfile(&key).unwrap()
         };
         assert!(is_file_manager(&app(

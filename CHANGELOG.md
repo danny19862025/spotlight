@@ -2,6 +2,7 @@
 
 ## 0.4.0 — 2026-10-20
 
+- Fixed content search skipping every match when the searched folder sat under a `build`, `target`, `dist`, `vendor`, or `node_modules` directory, and made the calendar backend, file-manager detection, and login autostart work on systems without `/usr/bin/python3` or `/bin/true`.
 - Added direct MPRIS music controls and local browser history/bookmark search across Firefox, Chrome, Chromium, and Brave profiles.
 - Added screenshot actions and local image/PDF tools for compression, resizing, conversion, text extraction, QR decoding, and color palettes.
 - Added Markdown todos, persistent Pomodoro timers with automatic Caffeinate, saved KDE window layouts, and ordered text/image clipboard paste queues.
