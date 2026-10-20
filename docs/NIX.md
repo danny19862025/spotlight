@@ -50,5 +50,12 @@ nix develop
 ```
 
 Run these checks on a machine with Nix installed before treating the package
-as verified. Desktop fixture tests remain opt-in. Both x86_64-linux and
-aarch64-linux are declared targets; neither has been verified locally yet.
+as verified. Desktop fixture tests remain opt-in. x86_64-linux is verified on
+NixOS 26.11; aarch64-linux is still unverified.
+
+The unit tests need a Nix-friendly build environment. The check phase points
+TMPDIR at /dev/shm, because the nix sandbox sets TMPDIR to /build and the
+content search excludes `**/build/**`, which would drop the test fixture. GIO
+also drops desktop entries whose Exec program is missing, so the opener
+fixture uses the nix coreutils path instead of /bin/true. The pixbuf loaders
+cache covers the WebP loader, which gdk-pixbuf does not ship itself.
