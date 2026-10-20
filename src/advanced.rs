@@ -767,17 +767,13 @@ fn local_browser(path: &str, port: u16) -> Result<String, String> {
     )
 }
 fn tabs(filter: &str) -> Result<Vec<Entry>, String> {
+    if std::env::var_os("SPOTLIGHT_CHROME_DEBUG_PORT").is_none() {
+        return crate::localtools::browser("history", filter, "chrom");
+    }
     let port = tab_port()?;
     let body = match local_browser("/json/list", port) {
         Ok(body) => body,
-        Err(_) => {
-            return Ok(vec![hint(
-                "Browser tab search is not connected",
-                format!(
-                    "Requires an existing Chrome/Chromium debugging endpoint at 127.0.0.1:{port} · see Guide → Browser tabs"
-                ),
-            )]);
-        }
+        Err(_) => return crate::localtools::browser("history", filter, "chrom"),
     };
     let values: Vec<Value> = serde_json::from_str(&body).map_err(|_| "Invalid browser tab list")?;
     let mut rows: Vec<_> = values

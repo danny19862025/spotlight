@@ -154,7 +154,7 @@ pub fn category(query: &str) -> Option<&'static str> {
     let text = query.trim().to_ascii_lowercase();
     let head = text.split_whitespace().next().unwrap_or("");
     Some(match head {
-        "docker" | "podman" => "containers",
+        "docker" | "podman" | "logs" => "containers",
         "font" | "fonts" => "fonts",
         "calendar" | "events" | "event" | "meet" => "calendar",
         "add" if text.starts_with("add event ") => "calendar",
@@ -166,9 +166,12 @@ pub fn category(query: &str) -> Option<&'static str> {
         }
         "ssh" => "ssh",
         "env" | "environment" | "dotenv" => "environment",
+        "get" | "post" | "put" | "patch" | "delete" | "head" | "http" => "system",
         "ai" => "ai",
         "store" | "plugin" | "ext" => "extensions",
         "clip" => "clipboard",
+        "layout" => "windows",
+        "todo" | "todos" => "saved",
         "window" | "windows" | "desktop" | "desktops" | "switch" | "switcher" | "close"
         | "quit"
             if text != "quit spotlight" =>
@@ -177,18 +180,22 @@ pub fn category(query: &str) -> Option<&'static str> {
         }
         "kill" if text.starts_with("kill window") => "windows",
         "ip" | "battery" | "disk" | "ram" | "uptime" | "speakers" | "outputs" | "audio"
-        | "tabs" | "apt" | "pacman" | "flatpak" | "packages" | "service" | "services"
-        | "systemctl" | "bluetooth" | "wifi" | "volume" | "kill" => "system",
+        | "music" | "player" | "play" | "playpause" | "play-pause" | "play/pause" | "pause"
+        | "next" | "previous" | "stop" | "tabs" | "apt" | "pacman" | "flatpak" | "packages"
+        | "service" | "services" | "systemctl" | "bluetooth" | "wifi" | "volume" | "kill" => {
+            "system"
+        }
         "my" if text == "my ip" => "system",
         "qr" | "ocr" | "lorem" | "case" | "json" | "uuid" | "hash" | "base64" | "define"
         | "dictionary" | "dict" | "translate" | "tldr" => "text",
         "generate" if text == "generate qr" || text.starts_with("generate qr ") => "text",
         "note" | "notes" | "snippet" | "snippets" | "quicklinks" | "quicklink" => "saved",
-        "timer" | "alarm" | "remind" | "reminder" => "timers",
+        "pomodoro" | "timer" | "alarm" | "remind" | "reminder" => "timers",
         "set" if text.contains("timer") || text.contains("alarm") => "timers",
-        "color" | "colors" | "pick" | "measure" | "screenshot" => "screen",
+        "palette" | "color" | "colors" | "pick" | "measure" | "screenshot" => "screen",
         "emoji" | "emojis" | "kaomoji" => "emoji",
-        "recent" | "rg" | "content" => "files",
+        "history" | "bookmark" | "bookmarks" | "compress" | "resize" | "pdf" | "image"
+        | "recent" | "rg" | "content" => "files",
         _ => return None,
     })
 }
@@ -200,6 +207,7 @@ pub fn item_category(item: &Item) -> Option<&'static str> {
         return Some("saved");
     }
     match &item.action {
+        Action::Workflow(op) => Some(op.category()),
         Action::Query(q) => category(q),
         Action::Extension(_) | Action::RunExtension { .. } | Action::Script(_) => {
             Some("extensions")

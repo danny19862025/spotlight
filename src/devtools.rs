@@ -107,7 +107,7 @@ fn expand_path(text: &str) -> PathBuf {
         PathBuf::from(text)
     }
 }
-fn bounded_text(path: &Path) -> Result<String, String> {
+pub(crate) fn bounded_text(path: &Path) -> Result<String, String> {
     use std::io::Read;
     let file =
         fs::File::open(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
@@ -231,7 +231,7 @@ fn ranked_projects(editor: &str, filter: &str, set_context: bool) -> Result<Vec<
 }
 
 // OpenSSH-style tokenization; no shell evaluation or Match/ProxyCommand execution.
-fn tokens(line: &str) -> Result<Vec<String>, String> {
+pub(crate) fn tokens(line: &str) -> Result<Vec<String>, String> {
     let mut result = Vec::new();
     let mut word = String::new();
     let mut quote = None;

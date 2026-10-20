@@ -37,10 +37,57 @@ pub struct Desktop {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Request<'a> {
     Windows,
+    CaptureLayout,
+    RestoreLayout { placements: &'a [Placement] },
     Desktops,
     FocusWindow { id: &'a str },
     SwitchDesktop { id: &'a str },
     CloseWindow { id: &'a str, pid: u32, all: bool },
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Placement {
+    pub id: String,
+    pub app: String,
+    pub title: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub minimized: bool,
+    pub fullscreen: bool,
+    pub vertical: bool,
+    pub horizontal: bool,
+    pub desktops: Vec<String>,
+}
+pub fn capture_layout() -> Result<Vec<Placement>, String> {
+    let payload = request(Request::CaptureLayout)?;
+    let placements: Vec<Placement> =
+        serde_json::from_str(&payload).map_err(|_| format!("Cannot capture layout: {payload}"))?;
+    if placements.is_empty() {
+        return Err("No application windows to save".into());
+    }
+    Ok(placements)
+}
+pub fn restore_layout(placements: &[Placement]) -> Result<String, String> {
+    if placements.len() > 200
+        || placements.iter().any(|p| {
+            ![p.x, p.y, p.width, p.height].iter().all(|n| n.is_finite())
+                || p.width <= 0.
+                || p.height <= 0.
+        })
+    {
+        return Err("Invalid saved window geometry".into());
+    }
+    let payload = request(Request::RestoreLayout { placements })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&payload).map_err(|_| "Invalid layout response")?;
+    if let Some(error) = value["error"].as_str() {
+        return Err(error.into());
+    }
+    Ok(format!(
+        "Restored {} windows · {} missing",
+        value["restored"], value["missing"]
+    ))
 }
 type Replies = Mutex<HashMap<String, mpsc::Sender<String>>>;
 static REPLIES: OnceLock<Replies> = OnceLock::new();
@@ -186,7 +233,28 @@ fn script(service: &str, token: &str, request: &Request<'_>) -> String {
 function reply(value) {{ callDBus({service}, '/local/spotlight/Windows', 'local.spotlight.Windows', 'Result', {token}, JSON.stringify(value)); }}
 try {{
 const windows = workspace.windowList(); const request = {request};
-const normal = windows.filter(w => !w.deleted && !w.specialWindow && !w.skipTaskbar && !w.skipSwitcher && w.normalWindow && !['local.spotlight.spotlight','local.spotlight.smoke','local.spotlight.features.test','spotlight'].some(name => String(w.resourceClass).toLowerCase() === name || String(w.resourceClass).toLowerCase().startsWith(name + '.')));
+const normal = windows.filter(w => !w.deleted && !w.specialWindow && !w.skipTaskbar && !w.skipSwitcher && w.normalWindow && !['local.spotlight.spotlight','local.spotlight.smoke','local.spotlight.features.test','local.spotlight.workflow.test','spotlight'].some(name => String(w.resourceClass).toLowerCase() === name || String(w.resourceClass).toLowerCase().startsWith(name + '.')));
+if (request.kind === 'capture_layout') {{
+ reply(normal.slice(0,200).map(w => ({{id:String(w.internalId),app:String(w.desktopFileName || w.resourceClass),title:String(w.caption),x:w.frameGeometry.x,y:w.frameGeometry.y,width:w.frameGeometry.width,height:w.frameGeometry.height,minimized:!!w.minimized,fullscreen:!!w.fullScreen,vertical:!!(Number(w.maximizeMode)&1),horizontal:!!(Number(w.maximizeMode)&2),desktops:w.desktops.map(d=>String(d.id))}}))); return;
+}}
+if (request.kind === 'restore_layout') {{
+ const used = []; let restored = 0;
+ request.placements.forEach(p => {{
+  const available = normal.filter(w => used.indexOf(w)<0 && String(w.desktopFileName || w.resourceClass)===p.app);
+  const w = available.find(w => String(w.internalId)===p.id) || available.find(w=>String(w.caption)===p.title) || (available.length===1 ? available[0] : null);
+  if (!w) return;
+  used.push(w); w.fullScreen=false; w.setMaximize(false,false);
+  if (w.tile) w.tile=null;
+  const screens=workspace.screens; const original={{x:p.x,y:p.y,width:p.width,height:p.height}};
+  const screen=screens.find(s=>p.x+p.width>s.geometry.x && p.x<s.geometry.x+s.geometry.width && p.y+p.height>s.geometry.y && p.y<s.geometry.y+s.geometry.height) || screens[0];
+  if (screen) {{ const g=screen.geometry; original.width=Math.min(p.width,g.width); original.height=Math.min(p.height,g.height); original.x=Math.max(g.x,Math.min(p.x,g.x+g.width-original.width)); original.y=Math.max(g.y,Math.min(p.y,g.y+g.height-original.height)); }}
+  w.frameGeometry=original;
+  const desktops=workspace.desktops.filter(d=>p.desktops.indexOf(String(d.id))>=0);
+  if (!p.desktops.length || desktops.length) w.desktops=desktops;
+  w.setMaximize(p.vertical,p.horizontal); w.fullScreen=p.fullscreen; w.minimized=p.minimized; restored++;
+ }});
+ reply({{restored:restored,missing:request.placements.length-restored}}); return;
+}}
 if (request.kind === 'close_window') {{
  const w = normal.find(w => String(w.internalId) === request.id);
  if (!w || (request.pid > 0 && Number(w.pid) !== request.pid)) {{ reply({{error:'That window has closed or changed'}}); return; }}

@@ -80,7 +80,7 @@ with tempfile.TemporaryDirectory(prefix='spotlight-features-',dir=fixture_parent
     context.set_source_rgb(1,1,1);context.paint();context.set_source_rgb(0,0,0)
     context.select_font_face('DejaVu Sans',cairo.FONT_SLANT_NORMAL,cairo.FONT_WEIGHT_BOLD);context.set_font_size(66);context.move_to(45,115);context.show_text('Spotlight 2026')
     image.write_to_png(str(root/'ocr.png'));shutil.copyfile(root/'ocr.png',pictures/'Screenshot Demo.png')
-    env=dict(os.environ,SPOTLIGHT_FEATURE_ROOT=str(root),XDG_DATA_HOME=str(data),XDG_CONFIG_HOME=str(config),XDG_CACHE_HOME=str(root/'cache'),PATH=str(tools)+os.pathsep+os.environ['PATH'],GIO_USE_VFS='local',GSK_RENDERER='cairo',NO_AT_BRIDGE='1',GTK_A11Y='none',GSETTINGS_BACKEND='memory')
+    env=dict(os.environ,SPOTLIGHT_FEATURE_ROOT=str(root),SPOTLIGHT_CHROME_DEBUG_PORT="9222",XDG_DATA_HOME=str(data),XDG_CONFIG_HOME=str(config),XDG_CACHE_HOME=str(root/'cache'),PATH=str(tools)+os.pathsep+os.environ['PATH'],GIO_USE_VFS='local',GSK_RENDERER='cairo',NO_AT_BRIDGE='1',GTK_A11Y='none',GSETTINGS_BACKEND='memory')
     bus=Gio.bus_get_sync(Gio.BusType.SESSION,None)
     klipper_calls=[]
     xml='''<node><interface name="org.kde.klipper.klipper">
@@ -97,8 +97,21 @@ with tempfile.TemporaryDirectory(prefix='spotlight-features-',dir=fixture_parent
     bus.register_object('/klipper',Gio.DBusNodeInfo.new_for_xml(xml).interfaces[0],method,None,None)
     reply=bus.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','RequestName',GLib.Variant('(su)',('org.kde.klipper',0)),None,Gio.DBusCallFlags.NONE,2000,None)
     assert reply.unpack()[0]==1
+    # Screenshot portal fixture returns a disposable capture and records every request.
+    portal_xml='<node><interface name="org.freedesktop.portal.Screenshot"><method name="Screenshot"><arg type="s" direction="in"/><arg type="a{sv}" direction="in"/><arg type="o" direction="out"/></method></interface></node>'
+    def screenshot(connection,sender,path,interface,name,parameters,invocation):
+        parent,options=parameters.unpack();assert options['interactive'] is True
+        request='/org/freedesktop/portal/desktop/request/'+sender.lstrip(':').replace('.','_')+'/'+options['handle_token']
+        count=root/'portal-count';number=int(count.read_text())+1 if count.exists() else 1;count.write_text(str(number))
+        capture=root/f'portal-capture-{number}.png';shutil.copyfile(root/'chain.png' if (root/'chain.png').exists() else root/'ocr.png',capture)
+        invocation.return_value(GLib.Variant('(o)',(request,)))
+        def respond():
+            connection.emit_signal(sender,request,'org.freedesktop.portal.Request','Response',GLib.Variant('(ua{sv})',(0,{'uri':GLib.Variant('s',capture.as_uri())})));return False
+        GLib.timeout_add(100,respond)
+    bus.register_object('/org/freedesktop/portal/desktop',Gio.DBusNodeInfo.new_for_xml(portal_xml).interfaces[0],screenshot,None,None)
+    bus.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','RequestName',GLib.Variant('(su)',('org.freedesktop.portal.Desktop',0)),None,Gio.DBusCallFlags.NONE,2000,None)
     names=['advanced::tests::fixture_backends']
-    if '--ui' in sys.argv:names.append('features_smoke::native_ui')
+    if '--ui' in sys.argv:names.extend(['features_smoke::native_ui', 'localtools_ui::tests::native_ui', 'localtools_ui::tests::screenshot_chain'])
     for name in names:
         with (root/'output.log').open('w+') as output:
             command=['cargo','test','--offline',name,'--','--ignored','--exact','--test-threads=1','--nocapture']

@@ -220,7 +220,7 @@ mod tests {
         }
         let catalog = steps
             .iter()
-            .map(|s| format!("{} {} {}", s.title, s.description, s.example))
+            .map(|s| format!("{} {} {} {}", s.title, s.description, s.example, s.tip))
             .collect::<Vec<_>>()
             .join("\n");
         for feature in [
@@ -326,6 +326,26 @@ mod tests {
             "Tab / Ctrl+K",
             "cargo clippy",
             "usability_smoke.py",
+            "music",
+            "play/pause",
+            "todo add buy milk",
+            "Screenshot action chain",
+            "do not request another portal capture",
+            "play lofi",
+            "history youtube",
+            "bookmark github",
+            "Decode QR",
+            "compress image 50%",
+            "resize 1080p",
+            "image to webp",
+            "pdf text",
+            "palette ~/Pictures/photo.png",
+            "git status",
+            "docker logs nginx",
+            "docker exec nginx",
+            "get https://api.github.com/user",
+            "Dotfiles sync",
+            "dotenv diff .env.local .env.example",
         ] {
             assert!(
                 catalog.contains(feature),

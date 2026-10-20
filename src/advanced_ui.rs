@@ -3,6 +3,14 @@ use gtk::{gdk, gio, glib, prelude::*};
 use std::{rc::Rc, sync::mpsc, time::Duration};
 impl Ui {
     pub(super) fn execute_booster(self: &Rc<Self>, operation: boosters::Operation) {
+        if let boosters::Operation::Kit(op) = operation {
+            self.execute_kit(op);
+            return;
+        }
+        if let boosters::Operation::Local(op) = operation {
+            self.execute_local(op);
+            return;
+        }
         if let boosters::Operation::Productivity(op) = &operation {
             match op {
                 crate::productivity::Operation::SummarizeClipboard => self.summarize_clipboard(),
@@ -162,7 +170,10 @@ impl Ui {
         dialog.add_controller(keys);
         dialog.present();
     }
-    fn ocr_worker(self: &Rc<Self>, work: impl FnOnce() -> Result<String, String> + Send + 'static) {
+    pub(super) fn ocr_worker(
+        self: &Rc<Self>,
+        work: impl FnOnce() -> Result<String, String> + Send + 'static,
+    ) {
         self.error("Extracting text…");
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {

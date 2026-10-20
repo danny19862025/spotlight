@@ -201,6 +201,39 @@ impl Ui {
             });
             menu.append(&button);
         }
+        if crate::search::image_path(&path) {
+            for tool in [
+                crate::localtools::Tool::Compress,
+                crate::localtools::Tool::Resize,
+                crate::localtools::Tool::Webp,
+                crate::localtools::Tool::Palette,
+            ] {
+                let button = gtk::Button::with_label(tool.title());
+                let ui = self.clone();
+                let target = path.clone();
+                let pop = popup.clone();
+                button.connect_clicked(move |_| {
+                    pop.popdown();
+                    ui.execute_local(crate::localtools::Operation::File(tool, target.clone()));
+                });
+                menu.append(&button);
+            }
+        } else if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+        {
+            let button = gtk::Button::with_label("Extract PDF text");
+            let ui = self.clone();
+            let pop = popup.clone();
+            button.connect_clicked(move |_| {
+                pop.popdown();
+                ui.execute_local(crate::localtools::Operation::File(
+                    crate::localtools::Tool::Pdf,
+                    path.clone(),
+                ));
+            });
+            menu.append(&button);
+        }
         menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     }
     pub(super) fn file_action(self: &Rc<Self>, action: FileAction, path: PathBuf) {

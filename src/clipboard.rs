@@ -10,7 +10,7 @@ pub enum Pinned {
     Image { id: String, path: PathBuf },
 }
 impl Pinned {
-    fn id(&self) -> &str {
+    pub(super) fn id(&self) -> &str {
         match self {
             Self::Text { id, .. } | Self::Image { id, .. } => id,
         }

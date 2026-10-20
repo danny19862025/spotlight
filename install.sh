@@ -11,6 +11,10 @@ cd "$(dirname "$0")"
 cargo build --release --locked --offline
 mkdir -p "$HOME/.local/bin" "$HOME/.local/lib/spotlight" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
 install -m 755 target/release/spotlight "$HOME/.local/lib/spotlight/spotlight"
+if pkg-config --exists Qt6Gui && [ -f /usr/include/KF6/KGuiAddons/ksystemclipboard.h ]; then
+    sh native/build-pastequeue.sh
+    install -m 755 target/native/spotlight-pastequeue "$HOME/.local/lib/spotlight/spotlight-pastequeue"
+fi
 install -m 644 docs/community-plugins.toml "$HOME/.local/lib/spotlight/community-plugins.toml"
 if pkg-config --exists Qt6Core libical; then
     sh native/build-freebusy.sh

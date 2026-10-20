@@ -32,6 +32,28 @@ No request is made when browsing the catalog. Release downloads occur after Inst
 
 `python3 tests/productivity_smoke.py` checks local-only status, cloud/remote/redirect refusal before prompts, proxy bypass, native AI/settings/store flows, aliases and disabled dispatch, synthetic Akonadi cache handling, real libical recurrence/timezones, checksum failures, duplicate preservation, and execution of an installed example in the real WASM sandbox. AI and Akonadi use private fixtures; no model, account, or remote calendar is needed.
 
+## Git status dashboard, live container logs and HTTP scratch
+
+`git status` scans `~/Projects` for repositories and worktrees, then shows dirty repositories in one list with branch and change counts. Append a repository-name fragment to filter. Enter previews changed paths and offers Open for the repository folder. It includes staged, unstaged, untracked and conflict entries. Clean repositories are counted but omitted from the list. Scanning avoids optional Git index locks and never stages changes. It skips symlinked directories and `.git`, `target`, `node_modules`, `vendor`, `__pycache__`, `build` and `dist`; a 100,000-directory / 30-second cap is reported when reached. Ctrl+R refreshes.
+
+`docker logs nginx`, `podman logs nginx` and the short form `logs nginx` find containers and open an in-app live log viewer. It shows the latest 200 lines plus new stdout/stderr with timestamps. **Stop Tail** stops the CLI; **Close** also kills and reaps it. The visible buffer keeps its most recent 1 MiB. **Copy Logs** copies the visible text. Logs can also be inspected for stopped containers.
+
+`docker exec nginx` opens an interactive `sh` in a running container. Use `docker exec nginx -- /bin/bash` or `podman exec nginx -- sh -lc 'your command'` for another executable. Commands are tokenized and passed as arguments, with no host shell interpolation. Requires the engine CLI, permission to use its engine, and Konsole, GNOME Terminal or xterm. Existing start/stop queries still work.
+
+`get https://api.github.com/user` or `http` opens **HTTP Scratch**. Select GET, POST, PUT, PATCH, DELETE, HEAD or OPTIONS; edit the URL, one `Header: value` per line, and an optional body, then press **Send**. It uses local curl and the requested HTTP(S) endpoint directly. Headers, body and response stay in the window and are never saved into usage history. Authentication must be entered explicitly in the headers field; Spotlight does not read `.curlrc`, browser cookies or netrc credentials. Responses include status, elapsed time, headers and text, with pretty-printed JSON where possible. HTTP 4xx/5xx bodies are displayed. Redirects are shown without automatically following them. Requests time out after 20 seconds; response bodies are limited to 1 MiB. **Copy Response** copies the result.
+
+`dotenv diff` compares the current project’s `.env` and `.env.example`; `dotenv diff .env.local .env.example` chooses another pair. Quoted paths and spaces work. Results list missing keys, extra keys and different values. Matching keys are omitted. Values are loaded only into the comparison preview when you select a key. Files are parsed as literal dotenv text and never sourced. Choose a project with `project /path/to/project` first, or pass absolute paths.
+
+## Dotfiles export and private sync
+
+Settings → General → **Dotfiles sync** accepts the root folder of an existing Git clone. **Export and commit** writes a private (0600) `spotlight/export.json` containing a schema version, snippets, saved notes, quick-note Markdown content and quicklinks. Usage history, clipboard pins, environment values and other settings are excluded. Missing quick-note source files stop export before any destination write. The export directory/file cannot be symlinks.
+
+Only the export file is staged and committed; unrelated staged files stay staged and are not included. An unchanged export does not create another commit. Configure your normal Git author identity in the destination repo. The repository folder is remembered in Spotlight settings. Export is manual; there is no background sync or import.
+
+**Sync private repo** exports and commits, then pushes `origin HEAD` without force. It requires one GitHub origin push URL and an authenticated `gh` CLI. Spotlight checks the actual push destination with `gh repo view --json isPrivate` before export and again before pushing, and refuses public or unverified repositories. This works with HTTPS and SSH GitHub URLs. For another Git host, use local export and your existing private-repository push workflow.
+
+`/usr/bin/python3 tests/devkit_smoke.py` checks the real GTK HTTP client against a local server, fixture container discovery and exact terminal arguments, live tail cancellation/reaping, export controls and private/public origin checks. It uses isolated home/data directories and fake engine/GitHub CLIs; it never executes in your containers or pushes personal data. Rust tests also verify HTTP error responses, literal request bodies, Git index preservation and unrelated staged-file isolation.
+
 ## Developer workflow
 
 | Command | Behavior |
@@ -111,11 +133,27 @@ In Clipboard History, **Ctrl+K** offers Pin entry, Unpin entry, filters, and Cle
 
 Clear history confirms before calling Klipper's supported clear-history and clear-contents methods. Spotlight's pins are retained. Spotlight does not edit Klipper's database directly.
 
-## Browser tabs
+## Music, browser pages, screenshots and local files
 
-Tab search uses Chrome DevTools' local HTTP discovery and activation endpoints. Configure a **loopback-only remote-debugging endpoint in a dedicated browser profile** using your browser's supported settings. Chrome's [remote-debugging changes](https://developer.chrome.com/blog/remote-debugging-port) describe the separate-profile requirement. A normal browser window without an endpoint cannot expose its tabs through KWin alone.
+`music` lists MPRIS players with title, artist, playback status and per-player Play/Pause, Play, Pause, Next, Previous and Stop actions. `pause`, `next track`, `previous track`, `play` and `stop` narrow the controls. These use MPRIS directly over session D-Bus, require no `playerctl`, respect player capabilities, and target the selected player. `play lofi` opens a clearly labelled YouTube search; MPRIS has no generic catalog-search API, so you choose a result in the browser. Browsing the result list does not change playback.
 
-The default endpoint is `http://127.0.0.1:9222`. Set `SPOTLIGHT_CHROME_DEBUG_PORT` in Spotlight's launch environment for another local port. Search `tabs chrome` or append a title/URL fragment. Only page targets are listed. Activation targets the existing tab rather than opening another copy. See the [DevTools protocol documentation](https://chromedevtools.github.io/devtools-protocol/).
+`history youtube` and `bookmark github` search Firefox `places.sqlite`, Chrome/Chromium/Brave `History` databases and Chromium-family `Bookmarks` JSON, including multiple normal profiles, standard Firefox/Chrome Flatpak locations and Firefox/Chromium Snap locations. Only HTTP(S) pages are offered. Enter opens the selected URL in the default browser. Python 3 and its standard SQLite library are required.
+
+Profiles are never written. Each lookup copies a stable database/WAL pair into a private temporary directory, queries that snapshot in SQLite read-only mode, then deletes it. This includes uncheckpointed visits while avoiding writes to the live profile's shared-memory read marks. A changing profile is retried; unreadable profiles produce a message while other profiles still return results. Snapshots are limited to 512 MiB per profile, query output to 80 unique URLs. See [SQLite WAL behavior](https://www.sqlite.org/wal.html).
+
+`tabs chrome` also works without debugging: it offers **History** results from Chrome/Chromium. These are recent pages and open URLs; they are not a list of currently open tabs. To activate live Chrome-family tabs instead, explicitly set `SPOTLIGHT_CHROME_DEBUG_PORT` for an existing loopback-only endpoint in a dedicated browser profile. Spotlight then queries `http://127.0.0.1:PORT/json/list` and activates selected targets. If the endpoint is unavailable, it returns recent pages. See [Chrome's remote-debugging changes](https://developer.chrome.com/blog/remote-debugging-port).
+
+`screenshot` or **Take Screenshot** hides Spotlight and requests an interactive capture through the desktop Screenshot portal. The preview keeps one capture and offers **Copy Image**. Press **Tab** or **Ctrl+K** for **OCR** (Tesseract), **Decode QR** (`zbarimg`), **Compress** (quality-50 WebP using vips or ffmpeg), **Pin** (Spotlight clipboard pins), and **Save…** (PNG file picker). Each action reuses the captured image. Compression asks for a local destination and keeps the capture available for the next action. Cancel returns to Spotlight. The portal's temporary capture is removed after loading. OCR and QR results open a text preview with Copy; decoded content is never automatically opened or executed.
+
+| Command | Result |
+| --- | --- |
+| `compress image 50% [path]` | Quality-50 WebP; the resulting byte size depends on the image |
+| `resize 1080p [path]` | PNG fitting inside 1920 × 1080, preserving aspect ratio and avoiding upscaling |
+| `image to webp [path]` | Quality-80 WebP |
+| `pdf text [path]` | Local `pdftotext -layout` extraction in a copyable preview; up to 1 MiB |
+| `palette [path]` or `color palette [path]` | Up to five dominant opaque colors with hex swatches, individual Copy and Copy All |
+
+Omit a path to use the file picker; quoted paths, `~/` and spaces work. Ctrl+K on an image or PDF offers the corresponding tools. Image conversions prefer `vips`, falling back to `ffmpeg` with its WebP encoder. Files are limited to 80 million pixels. A private work directory holds conversion output; the finished file is saved beside its original with an unused filename and 0600 permissions. Existing files are never replaced. Palette extraction runs locally through the installed image decoder, ignores transparent pixels, and can yield fewer colors for flat images. Copying one palette color also makes it available in Spotlight's Color Formats view.
 
 ## Packages and services
 
@@ -130,3 +168,20 @@ Normal window closing uses the [KWin scripting API](https://develop.kde.org/docs
 `cargo test --offline` checks parsers, text vectors, identity validation, and compatibility with older saved data. `python3 tests/features_smoke.py --ui` runs the fixture-backed backend and real GTK checks in a private D-Bus session. It independently decodes a generated Unicode QR code when `zbarimg` is installed and runs real Tesseract OCR. Package installs, service actions, audio switching, Bluetooth connections, and clipboard clearing use fixtures. Trash checks use disposable files and an isolated Trash directory.
 
 On KDE, `python3 tests/window_controls_smoke.py` additionally creates three disposable GTK processes and verifies real KWin close, application quit, and force-quit behavior. It rejects a stale process identity before force-quitting the selected fixture. Existing applications are not targeted.
+
+## Local todos, Pomodoro, window layouts, and paste queue
+
+| Command | Action |
+| --- | --- |
+| `todo add buy milk` (or `todo buy milk`) | Append `- [ ] buy milk` to local `todos.md` |
+| `todo` / `todo done` | List open/completed tasks; Enter toggles completion |
+| `pomodoro` / `pomodoro 25m` | Start a focus timer and keep awake until it ends or is cancelled |
+| `layout save work` | Save KWin window positions under `work` |
+| `layout work` / `layout restore work` | Restore open windows from the saved layout |
+| `layout` / `layout delete work` | List layouts / remove saved positions |
+| `clip queue` | Review, select, and reorder clipboard pins for repeated pasting |
+| `clip queue stop` | Stop the active queue |
+
+Todos live in `$XDG_DATA_HOME/spotlight/todos.md` (default `~/.local/share/spotlight/todos.md`) and can be edited externally. Updates reject stale selected lines. Layouts and Pomodoro deadlines use Spotlight's existing private store. Window restore uses KWin and never launches missing apps. Disconnected-screen geometry is clamped to a connected screen. Pomodoro uses a separate inhibitor from manual Caffeinate, released at expiry or cancellation; Spotlight must run to ring or inhibit sleep.
+
+The queue requires the optional Qt 6 / KDE GuiAddons helper (`sh native/build-pastequeue.sh`), automatically built by `install.sh` when those development packages are available. KDE Wayland background access uses KSystemClipboard / data-control. The paste queue offers text or PNG images and advances on clipboard content requests. Paste at least 150 ms apart; a clipboard-reading utility other than Klipper can also consume an entry. Copying something else cancels the queue. Queue payloads use private temporary runtime files, removed when Spotlight exits or the queue is replaced; pins remain unchanged. `python3 tests/workflow_smoke.py` uses temporary XDG data, one disposable KWin window, real Caffeinate, and a separate GTK paste destination; it restores the previous text/image clipboard afterward.

@@ -14,6 +14,8 @@ pub enum Query {
     Productivity(crate::productivity::Query),
     Dev(crate::devtools::Query),
     Advanced(crate::advanced::Query),
+    Local(crate::localtools::Query),
+    Kit(crate::devkit::Query),
     Offline(crate::offline::Query),
     Windows(String),
     Desktops(String),
@@ -29,6 +31,12 @@ pub enum Query {
 }
 impl Query {
     pub fn parse(text: &str) -> Option<Self> {
+        if let Some(query) = crate::devkit::Query::parse(text) {
+            return Some(Self::Kit(query));
+        }
+        if let Some(query) = crate::localtools::Query::parse(text) {
+            return Some(Self::Local(query));
+        }
         if let Some(query) = crate::productivity::Query::parse(text) {
             return Some(Self::Productivity(query));
         }
@@ -101,6 +109,8 @@ pub enum Operation {
     Productivity(crate::productivity::Operation),
     Dev(crate::devtools::Operation),
     Advanced(crate::advanced::Operation),
+    Local(crate::localtools::Operation),
+    Kit(crate::devkit::Operation),
     Query(String),
     FocusWindow(String),
     SwitchDesktop(String),
@@ -240,6 +250,8 @@ pub fn fetch(query: &Query) -> Result<Vec<Entry>, String> {
         Query::Productivity(query) => crate::productivity::fetch(query),
         Query::Dev(query) => crate::devtools::fetch(query),
         Query::Advanced(query) => crate::advanced::fetch(query),
+        Query::Local(query) => crate::localtools::fetch(query),
+        Query::Kit(query) => crate::devkit::fetch(query),
         Query::Offline(query) => crate::offline::fetch(query),
         Query::Windows(query) => crate::windowing::fetch(query),
         Query::Desktops(query) => crate::windowing::fetch_desktops(query),
@@ -621,6 +633,8 @@ fn decode_definitions(word: &str, output: &str) -> Result<Vec<Entry>, String> {
 
 pub fn execute(operation: Operation) -> Result<String, String> {
     match operation {
+        Operation::Kit(_) => Err("This action needs the Spotlight window".into()),
+        Operation::Local(_) => Err("This command must be opened in Spotlight".into()),
         Operation::Productivity(_) => Err("This command must be opened in Spotlight".into()),
         Operation::Dev(operation) => crate::devtools::execute(operation),
         Operation::Advanced(operation) => crate::advanced::execute(operation),

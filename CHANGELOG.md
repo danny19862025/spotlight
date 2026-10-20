@@ -1,5 +1,13 @@
 # Release notes
 
+## 0.4.0 — 2026-10-20
+
+- Added direct MPRIS music controls and local browser history/bookmark search across Firefox, Chrome, Chromium, and Brave profiles.
+- Added screenshot actions and local image/PDF tools for compression, resizing, conversion, text extraction, QR decoding, and color palettes.
+- Added Markdown todos, persistent Pomodoro timers with automatic Caffeinate, saved KDE window layouts, and ordered text/image clipboard paste queues.
+- Added a Git dashboard, container log streaming and interactive shells, an HTTP scratch client, dotenv comparisons, and dotfiles export with verified private GitHub sync.
+- Expanded the built-in Guide to 90 topics and documented setup, dependencies, and command examples. Added browser-data, music, developer-tool, and desktop-workflow regression checks.
+
 ## 0.3.0 — 2026-10-18
 
 - Added a permanent Tab actions hint and key binding, opt-in `--autostart` / `--no-autostart` with hidden login startup, and home `.spotlightignore` rules for indexed and recent files. Added strict Clippy CI, native keyboard/startup regression checks, and actual GTK screenshots to the README.

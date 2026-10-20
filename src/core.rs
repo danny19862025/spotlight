@@ -43,8 +43,10 @@ pub struct Store {
     pub desktop_snippets: bool,
     pub emoji_skin_tone: Option<u8>,
     pub emoji_tones: HashMap<String, u8>,
+    pub window_layouts: HashMap<String, Vec<crate::windowing::Placement>>,
     pub pinned_clips: Vec<crate::clipboard::Pinned>,
     pub project_context: Option<PathBuf>,
+    pub dotfiles_repo: Option<PathBuf>,
     pub commands: crate::customization::Preferences,
 }
 impl Store {

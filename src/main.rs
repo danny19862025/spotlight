@@ -12,9 +12,12 @@ mod core;
 mod currency;
 mod customization;
 mod desktop;
+mod devkit;
+mod devkit_ui;
 mod devtools;
 #[cfg(test)]
 mod devtools_smoke;
+mod dotfiles;
 mod emoji;
 mod extensions;
 #[cfg(test)]
@@ -25,9 +28,13 @@ mod fonts;
 mod guide;
 mod interface;
 mod localai;
+mod localtools;
+mod localtools_ui;
 mod measure;
+mod mpris;
 mod offline;
 mod opener;
+mod pastequeue;
 mod pim;
 mod pluginstore;
 mod productivity;
@@ -40,10 +47,14 @@ mod shortcut;
 mod snippets;
 mod texttools;
 mod theme;
+mod todos;
 #[cfg(test)]
 mod usability_smoke;
 mod wasmplugins;
 mod windowing;
+mod workflow;
+#[cfg(test)]
+mod workflow_smoke;
 use core::{Store, TextItem};
 use gtk::{gdk, gio, glib, prelude::*};
 use std::{
@@ -111,6 +122,7 @@ impl Page {
 }
 #[derive(Clone)]
 enum Action {
+    Workflow(workflow::Operation),
     Extension(extensions::Manifest),
     RunExtension {
         manifest: extensions::Manifest,
@@ -243,6 +255,9 @@ struct Ui {
     measuring_screen: Cell<bool>,
     measurement_window: RefCell<Option<measure::Ruler>>,
     caffeinate: RefCell<Option<caffeinate::Inhibitor>>,
+    pomodoro_awake: RefCell<Option<caffeinate::Inhibitor>>,
+    paste_queue: RefCell<Option<Rc<pastequeue::Queue>>>,
+    layout_busy: Cell<bool>,
     desktop_snapshot: RefCell<desktop::Snapshot>,
     desktop_loading: Cell<bool>,
     desktop_busy: Cell<bool>,
@@ -519,6 +534,14 @@ impl Ui {
         }
     }
     fn load_clipboard(self: &Rc<Self>) {
+        if self
+            .paste_queue
+            .borrow()
+            .as_ref()
+            .is_some_and(|q| q.active.get())
+        {
+            return;
+        }
         self.capture_clipboard_image();
         let generation = self.clip_generation.get();
         self.clips.borrow_mut().clear();
@@ -740,6 +763,9 @@ impl Ui {
         let clipboard = self.window.clipboard();
         copy.connect_clicked(move |_| clipboard.set_texture(&image));
         panel.append(&copy);
+        if title == "Screenshot" {
+            self.screenshot_actions(&panel, texture, &dialog);
+        }
         let close = gtk::Button::with_label("Close");
         let weak = dialog.downgrade();
         close.connect_clicked(move |_| {
@@ -1395,6 +1421,16 @@ impl Ui {
             self.error("Cannot save timers while saved data is unreadable");
             return;
         }
+        let pomodoro = matches!(draft, reminder::Draft::Pomodoro(_));
+        if pomodoro && self.pomodoro_awake.borrow().is_none() {
+            match caffeinate::Inhibitor::start() {
+                Ok(inhibitor) => *self.pomodoro_awake.borrow_mut() = Some(inhibitor),
+                Err(e) => {
+                    self.error(&e);
+                    return;
+                }
+            }
+        }
         let result = (|| -> Result<String, String> {
             let now = glib::DateTime::now_local().map_err(|e| e.to_string())?;
             let entry = draft.create(&now)?;
@@ -1416,6 +1452,7 @@ impl Ui {
             }
             Ok(label)
         })();
+        self.sync_pomodoro();
         match result {
             Ok(label) => {
                 self.search.set_text("");
@@ -1445,6 +1482,7 @@ impl Ui {
         if empty && let Some(source) = self.reminder_clock.borrow_mut().take() {
             source.remove();
         }
+        self.sync_pomodoro();
         self.refresh();
         self.error("Reminder cancelled");
     }
@@ -1465,6 +1503,7 @@ impl Ui {
         store.ringing_reminders.extend(due.iter().cloned());
         let saved = store.save();
         drop(store);
+        self.sync_pomodoro();
         for entry in &due {
             if let Some(app) = self.window.application() {
                 let title = if entry.alarm {
@@ -1638,6 +1677,9 @@ impl Ui {
         self.search.grab_focus();
     }
     fn measure_screen(self: &Rc<Self>) {
+        self.capture_screen(false);
+    }
+    fn capture_screen(self: &Rc<Self>, screenshot: bool) {
         if self.measuring_screen.replace(true) {
             if let Some(ruler) = self.measurement_window.borrow().as_ref() {
                 ruler.window.present();
@@ -1652,9 +1694,10 @@ impl Ui {
             let bus = match gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) {
                 Ok(bus) => bus,
                 Err(error) => {
-                    ui.finish_measurement(Err(format!(
-                        "Could not connect to screen capture: {error}"
-                    )));
+                    ui.finish_capture(
+                        screenshot,
+                        Err(format!("Could not connect to screen capture: {error}")),
+                    );
                     return;
                 }
             };
@@ -1678,14 +1721,14 @@ impl Ui {
                 gio::DBusSignalFlags::NONE,
                 move |signal| {
                     if let Some(ui) = weak.upgrade() {
-                        ui.finish_measurement(measure::response(signal.parameters));
+                        ui.finish_capture(screenshot, measure::response(signal.parameters));
                     }
                 },
             );
             *ui.measurement_request.borrow_mut() = Some((path.clone(), subscription));
             let options = std::collections::HashMap::from([
                 ("handle_token", token.to_variant()),
-                ("interactive", false.to_variant()),
+                ("interactive", screenshot.to_variant()),
             ]);
             let weak = Rc::downgrade(&ui);
             bus.call(
@@ -1705,12 +1748,14 @@ impl Ui {
                     }
                     match result {
                         Ok(reply) if reply.child_value(0).str() == Some(path.as_str()) => {}
-                        Ok(_) => ui.finish_measurement(Err(
-                            "Unexpected response from screen capture".into(),
-                        )),
-                        Err(error) => ui.finish_measurement(Err(format!(
-                            "Could not capture the screen: {error}"
-                        ))),
+                        Ok(_) => ui.finish_capture(
+                            screenshot,
+                            Err("Unexpected response from screen capture".into()),
+                        ),
+                        Err(error) => ui.finish_capture(
+                            screenshot,
+                            Err(format!("Could not capture the screen: {error}")),
+                        ),
                     }
                 },
             );
@@ -1730,8 +1775,9 @@ impl Ui {
             })
         };
         drop(state);
-        self.awake_status
-            .set_visible(self.caffeinate.borrow().is_some());
+        self.awake_status.set_visible(
+            self.caffeinate.borrow().is_some() || self.pomodoro_awake.borrow().is_some(),
+        );
         self.refresh();
         self.error(match &result {
             Ok(message) => message,
@@ -2572,25 +2618,75 @@ impl Ui {
                 .into();
         out.push(ruler);
         let awake = self.caffeinate.borrow().is_some();
+        let focus_awake = self.pomodoro_awake.borrow().is_some();
         let mut caffeine = item(
             "caffeinate",
             if awake {
                 "Turn Off Caffeinate"
+            } else if focus_awake {
+                "Caffeinate · Pomodoro active"
             } else {
                 "Caffeinate · Keep Awake"
             },
             if awake {
-                "Active · Enter to restore normal screen and sleep settings"
+                if focus_awake {
+                    "Manual Caffeinate active · Enter turns off manual mode; Pomodoro stays awake"
+                } else {
+                    "Active · Enter to restore normal screen and sleep settings"
+                }
+            } else if focus_awake {
+                "Pomodoro is keeping awake · Enter also enables manual Caffeinate"
             } else {
                 "Keep the screen and computer awake while Spotlight runs · Enter to turn on"
             },
             "weather-clear-symbolic",
-            if awake { "On" } else { "Off" },
+            if awake {
+                "On"
+            } else if focus_awake {
+                "Pomodoro"
+            } else {
+                "Off"
+            },
             Action::Caffeinate,
         );
         caffeine.keywords =
             "caffeinate caffinate caffeine keep awake screen sleep suspend prevent disable".into();
         out.push(caffeine);
+        for (id, title, detail, query) in [
+            (
+                "local-todos",
+                "Local Todos",
+                "todo add buy milk · todo · todo done · editable todos.md",
+                "todo",
+            ),
+            (
+                "saved-layouts",
+                "Window Layouts",
+                "layout save work · layout work",
+                "layout",
+            ),
+            (
+                "paste-queue",
+                "Clipboard Paste Queue",
+                "clip queue · paste pins in order",
+                "clip queue",
+            ),
+            (
+                "start-pomodoro",
+                "Pomodoro",
+                "pomodoro 25m · Caffeinate turns on during focus",
+                "pomodoro 25m",
+            ),
+        ] {
+            out.push(item(
+                id,
+                title,
+                detail,
+                "view-list-symbolic",
+                "Command",
+                Action::Query(query.into()),
+            ));
+        }
         out.push(window_shortcuts_item());
         out.push(item(
             "desktop-snippets",
@@ -2901,11 +2997,6 @@ impl Ui {
                 vec!["loginctl", "lock-session"],
             ),
             (
-                "Take Screenshot",
-                "camera-photo-symbolic",
-                vec!["spectacle"],
-            ),
-            (
                 "System Settings",
                 "preferences-system-symbolic",
                 vec!["systemsettings"],
@@ -2973,8 +3064,78 @@ impl Ui {
                 "speakers",
             ),
             (
+                "Take Screenshot",
+                "Capture once · Tab for OCR, QR, Compress, Pin and Save",
+                "screenshot",
+            ),
+            (
+                "Git Status Dashboard",
+                "Dirty repositories under ~/Projects",
+                "git status",
+            ),
+            (
+                "Docker Logs",
+                "Tail container logs in Spotlight",
+                "docker logs ",
+            ),
+            (
+                "Docker Exec",
+                "Open an interactive container shell",
+                "docker exec ",
+            ),
+            (
+                "HTTP Scratch",
+                "Make HTTP requests and inspect responses locally",
+                "http ",
+            ),
+            (
+                "Compare Dotenv Files",
+                "Compare .env and .env.example in the current project",
+                "dotenv diff",
+            ),
+            (
+                "Music Controls",
+                "Play, pause and skip MPRIS players",
+                "music",
+            ),
+            (
+                "Browser History",
+                "Search Firefox, Chrome, Chromium and Brave history",
+                "history ",
+            ),
+            (
+                "Browser Bookmarks",
+                "Search local browser bookmarks",
+                "bookmark ",
+            ),
+            (
+                "Compress Image 50%",
+                "Save a WebP at quality 50 · original kept",
+                "compress image 50%",
+            ),
+            (
+                "Resize Image 1080p",
+                "Fit within 1920 × 1080 · original kept",
+                "resize 1080p",
+            ),
+            (
+                "PDF Text",
+                "Extract text locally with pdftotext",
+                "pdf text",
+            ),
+            (
+                "Image to WebP",
+                "Convert locally · original kept",
+                "image to webp",
+            ),
+            (
+                "Color Palette from Image",
+                "Choose an image and copy its dominant colors",
+                "palette",
+            ),
+            (
                 "Browser Tabs",
-                "Search a connected local Chrome/Chromium debugging endpoint",
+                "Recent Chrome pages · optional connected live tabs",
                 "tabs chrome",
             ),
             (
@@ -3347,6 +3508,9 @@ impl Ui {
                     _ => None,
                 };
                 let action = match e.operation {
+                    Some(boosters::Operation::Local(localtools::Operation::Open(uri))) => {
+                        Action::Open(uri)
+                    }
                     Some(boosters::Operation::Query(query)) => Action::Query(query),
                     Some(boosters::Operation::Preview { title, text, open }) => {
                         Action::Preview { title, text, open }
@@ -3923,6 +4087,20 @@ impl Ui {
             }
         }
         drop(store);
+        if page == Page::Root && allowed {
+            let workflow_rows = self.workflow_rows(q);
+            if q == "todo"
+                || q == "todos"
+                || q.starts_with("todo ")
+                || q == "layout"
+                || q.starts_with("layout ")
+                || q.starts_with("clip queue")
+            {
+                results = workflow_rows;
+            } else {
+                results.splice(0..0, workflow_rows);
+            }
+        }
         if page == Page::Root && !q.is_empty() && allowed {
             if fonts::query(q) == Some("") {
                 results.retain(|entry| !matches!(entry.action, Action::Page(Page::Fonts)));
@@ -3973,7 +4151,11 @@ impl Ui {
                     Ok(draft) => item(
                         "schedule-reminder",
                         &format!("Set {}", draft.label()),
-                        "Enter to start · search timer or alarm to cancel",
+                        if matches!(draft, reminder::Draft::Pomodoro(_)) {
+                            "Enter to start · Caffeinate auto-on until finish or cancellation"
+                        } else {
+                            "Enter to start · search timer or alarm to cancel"
+                        },
                         "alarm-symbolic",
                         "Set",
                         Action::Schedule(draft),
@@ -4376,6 +4558,10 @@ impl Ui {
             self.save();
         }
         let result: Result<(), String> = match i.action {
+            Action::Workflow(op) => {
+                self.workflow(op);
+                return;
+            }
             Action::ClearClipboard => {
                 self.clear_clipboard();
                 return;
@@ -4861,6 +5047,7 @@ impl Ui {
             panel.append(&l);
         }
         panel.append(&self.customization_panel());
+        panel.append(&self.dotfiles_panel());
         let font_label = gtk::Label::new(Some(&format!(
             "Spotlight font: {}",
             self.store
@@ -5721,6 +5908,9 @@ fn build_with_mode(app: &gtk::Application, test: bool) -> Rc<Ui> {
         measuring_screen: Cell::new(false),
         measurement_window: RefCell::new(None),
         caffeinate: RefCell::new(None),
+        pomodoro_awake: RefCell::new(None),
+        paste_queue: RefCell::new(None),
+        layout_busy: Cell::new(false),
         desktop_snapshot: RefCell::new(desktop::Snapshot::default()),
         desktop_loading: Cell::new(false),
         desktop_busy: Cell::new(false),
@@ -5733,6 +5923,13 @@ fn build_with_mode(app: &gtk::Application, test: bool) -> Rc<Ui> {
         alarm_repeat: RefCell::new(None),
         alarm_label: RefCell::new(None),
         event_editor: RefCell::new(None),
+    });
+    let weak_queue_ui = Rc::downgrade(&ui);
+    app.connect_shutdown(move |_| {
+        if let Some(ui) = weak_queue_ui.upgrade() {
+            ui.paste_queue.borrow_mut().take();
+            ui.pomodoro_awake.borrow_mut().take();
+        }
     });
     if let Some(e) = load_error {
         ui.error(&format!(
@@ -5929,6 +6126,7 @@ fn build_with_mode(app: &gtk::Application, test: bool) -> Rc<Ui> {
     if !test {
         ui.load_desktop();
         ui.arm_reminders();
+        ui.sync_pomodoro();
         if ui.can_save && ui.store.borrow().desktop_snippets {
             let result = {
                 let store = ui.store.borrow();
@@ -6109,12 +6307,32 @@ fn smoke_guide(ui: Rc<Ui>) {
                 .downcast()
                 .unwrap()
         };
+        let topic_index = |menu: &gtk::DropDown, title: &str| -> u32 {
+            let model = menu.model().unwrap();
+            (0..model.n_items())
+                .find(|i| {
+                    model
+                        .item(*i)
+                        .and_downcast::<gtk::StringObject>()
+                        .is_some_and(|s| s.string().ends_with(&format!(" · {title}")))
+                })
+                .unwrap_or_else(|| panic!("Missing guide topic {title}"))
+        };
         match phase {
             0 => {
                 let settings = test_settings_window();
                 let menu = chooser(&settings);
                 let model = menu.model().unwrap();
-                assert_eq!(model.n_items(), 78);
+                assert!(model.n_items() >= 90);
+                for title in [
+                    "Music controls · MPRIS players",
+                    "Browser history and bookmarks",
+                    "Local todos",
+                    "Git status dashboard · dirty repositories",
+                    "Screenshot action chain · OCR, QR, compress and pin",
+                ] {
+                    topic_index(&menu, title);
+                }
                 assert!(menu.enables_search());
                 for index in 0..model.n_items() {
                     menu.set_selected(index);
@@ -6136,7 +6354,7 @@ fn smoke_guide(ui: Rc<Ui>) {
                         model.n_items()
                     )));
                 }
-                menu.set_selected(24);
+                menu.set_selected(topic_index(&menu, "Create calendar events from text"));
             }
             1 => {
                 let settings = test_settings_window();
@@ -6184,7 +6402,7 @@ fn smoke_guide(ui: Rc<Ui>) {
                         .downcast()
                         .unwrap();
                 popup.popdown();
-                menu.set_selected(24);
+                menu.set_selected(topic_index(&menu, "Create calendar events from text"));
                 test_named_button(&settings, "guide-try").emit_clicked();
                 assert_eq!(ui.search.text().as_str(), "event on July 13 2027");
                 assert!(
@@ -6197,18 +6415,69 @@ fn smoke_guide(ui: Rc<Ui>) {
             3 => {
                 let settings = test_settings_window();
                 let menu = chooser(&settings);
-                assert_eq!(menu.selected(), 24, "Guide remembers a jumped-to topic");
-                menu.set_selected(6);
+                assert_eq!(
+                    menu.selected(),
+                    topic_index(&menu, "Create calendar events from text"),
+                    "Guide remembers a jumped-to topic"
+                );
+                menu.set_selected(topic_index(&menu, "Recent files and folders"));
                 test_named_button(&settings, "guide-try").emit_clicked();
                 assert!(
                     *ui.page.borrow() == Page::Recent,
                     "Recent example opens the separate view"
                 );
                 ui.settings_at(2);
+                let menu = chooser(&test_settings_window());
+                menu.set_selected(topic_index(&menu, "HTTP scratch · quick REST client"));
             }
             4 => {
                 let settings = test_settings_window();
-                chooser(&settings).set_selected(44);
+                assert_eq!(
+                    label(&settings, "guide-title").text().as_str(),
+                    "HTTP scratch · quick REST client"
+                );
+                capture_test_window(&settings, "/tmp/spotlight-guide-http.png");
+                test_named_button(&settings, "guide-try").emit_clicked();
+                assert_eq!(ui.search.text().as_str(), "get https://api.github.com/user");
+                assert!(
+                    !gtk::Window::list_toplevels()
+                        .into_iter()
+                        .filter_map(|w| w.downcast::<gtk::Window>().ok())
+                        .any(|w| w.title().as_deref() == Some("HTTP Scratch")),
+                    "Guide only prepares HTTP search"
+                );
+                ui.settings_at(2);
+                let menu = chooser(&test_settings_window());
+                menu.set_selected(topic_index(
+                    &menu,
+                    "Dotfiles sync · export to a private Git repo",
+                ));
+            }
+            5 => {
+                let settings = test_settings_window();
+                assert_eq!(
+                    label(&settings, "guide-title").text().as_str(),
+                    "Dotfiles sync · export to a private Git repo"
+                );
+                capture_test_window(&settings, "/tmp/spotlight-guide-dotfiles.png");
+                test_named_button(&settings, "guide-try").emit_clicked();
+                let tabs: gtk::Stack = test_widget(settings.upcast_ref(), &|w| {
+                    w.widget_name() == "settings-pages"
+                })
+                .unwrap()
+                .downcast()
+                .unwrap();
+                assert_eq!(tabs.visible_child_name().as_deref(), Some("general"));
+                assert!(
+                    ui.store.borrow().dotfiles_repo.is_none(),
+                    "Guide does not configure or run exports"
+                );
+                tabs.set_visible_child_name("guide");
+            }
+            6 => {
+                let settings = test_settings_window();
+                let menu = chooser(&settings);
+                menu.set_selected(topic_index(&menu, "Window layout and interface size"));
                 test_named_button(&settings, "guide-try").emit_clicked();
                 let tabs: gtk::Stack = test_widget(settings.upcast_ref(), &|w| {
                     w.widget_name() == "settings-pages"
@@ -6233,13 +6502,29 @@ fn smoke_guide(ui: Rc<Ui>) {
                 assert_eq!(ui.guide_step.get(), 0);
                 ui.settings_at(2);
             }
-            5 => {
+            7 => {
                 let settings = test_settings_window();
                 assert_eq!(chooser(&settings).selected(), 0);
                 capture_test_window(&settings, "/tmp/spotlight-guide-overview.png");
+                let menu = chooser(&settings);
+                menu.set_selected(topic_index(
+                    &menu,
+                    "Screenshot action chain · OCR, QR, compress and pin",
+                ));
+            }
+            8 => {
+                let settings = test_settings_window();
+                assert!(
+                    label(&settings, "guide-description")
+                        .text()
+                        .contains("one capture")
+                );
+                assert!(label(&settings, "guide-example").text().contains("Tab"));
+                assert!(label(&settings, "guide-tip").text().contains("same image"));
+                capture_test_window(&settings, "/tmp/spotlight-guide-screenshot-chain.png");
                 settings.close();
                 println!(
-                    "Guide UI passed: all 78 topics, searchable topic menu, direct navigation, calendar and Recent examples, Settings links, remembered topic, Back, and Start searching"
+                    "Guide UI passed: every topic, new local tools and screenshot chain, searchable topic menu, direct navigation, calendar, Recent and HTTP examples, dotfiles and Settings links, remembered topic, Back, and Start searching"
                 );
                 ui.window.application().unwrap().quit();
                 return glib::ControlFlow::Break;

@@ -13,7 +13,7 @@ These instructions cover the main distro families and provide a general method f
 - Git, curl, and CA certificates. Internet access is needed to download the source and Rust dependencies; currency conversion also uses curl at runtime.
 - KDE Plasma is recommended for the full feature set.
 
-The launcher, calculator, notes, snippets, and other local tools can be used on other GTK-compatible desktops, but those desktops are not fully verified. Clipboard history requires KDE Klipper; window actions require KWin; automatic shortcut registration requires KDE's shortcut service. Caffeinate uses KDE PowerDevil and the screen saver service. Screenshot and KDE Settings commands also depend on KDE applications. Color picking needs a desktop portal backend with support for picking a color. Screen Measurement needs a working Screenshot portal. Installing build dependencies alone does not add these desktop services.
+The launcher, calculator, notes, snippets, and other local tools can be used on other GTK-compatible desktops, but those desktops are not fully verified. Clipboard history requires KDE Klipper; window actions require KWin; automatic shortcut registration requires KDE's shortcut service. Caffeinate uses KDE PowerDevil and the screen saver service. KDE Settings depends on KDE applications. Color picking needs a desktop portal backend with support for picking a color. Screen Measurement needs a working Screenshot portal. Installing build dependencies alone does not add these desktop services.
 
 ## 1. Install your distro's dependencies
 
@@ -191,11 +191,15 @@ export PATH="$HOME/.local/bin:$PATH"
 
 | Feature | What it needs |
 | --- | --- |
+| Clipboard paste queue | Qt 6 Gui and KDE GuiAddons development packages to build `native/build-pastequeue.sh`; installer builds/installs this optional helper when available |
 | Clipboard history | KDE Klipper for text and saved images (image database version 3); current images can also be read directly from the clipboard |
 | Offline dictionary | Local dictd-format dictionaries; `gzip` for compressed files, or an optional loopback dictd server; see [setup](OFFLINE.md) |
 | WASM plugins | Built into Spotlight; plugin authors need a wasm32 compiler, users need no external runtime. See [WASM/SDK setup](WASM.md) |
 | Native manifest extensions | The runtime declared by each installed script; see [API](EXTENSIONS.md) |
 | Developer tools | `git`, optional GitHub CLI `gh`, Docker/Podman, and optional Espanso for desktop snippet expansion |
+| Container logs / exec | Docker or Podman CLI and engine access; exec also needs Konsole, GNOME Terminal or xterm |
+| HTTP scratch | `curl` and network access to your requested HTTP(S) endpoint |
+| Dotfiles sync | Existing Git clone and Git author identity; private GitHub sync also requires authenticated `gh` |
 | Content search | `rg` (ripgrep) |
 | Contacts and Akonadi calendar search | Optional Akonadi bridge; local vCard/iCalendar files also work. See [PIM setup](PIM.md) |
 | GNOME Calendar/Evolution events | System `/usr/bin/python3`, PyGObject, Evolution Data Server, and `ECal-2.0` / `EDataServer-1.2` introspection libraries with configured calendars. Local-only event creation needs no desktop calendar bridge. See [calendar setup](PIM.md) |
@@ -206,7 +210,11 @@ export PATH="$HOME/.local/bin:$PATH"
 | Dark mode and Do Not Disturb | KDE Plasma, `plasma-apply-colorscheme`, and the notification applet |
 | Empty Trash | KDE KIO's `ktrash6` |
 | Color picker | `xdg-desktop-portal` and your desktop's backend with PickColor support; KDE normally uses `xdg-desktop-portal-kde` |
-| Screenshot command | KDE Spectacle |
+| Screenshots | `xdg-desktop-portal` and a Screenshot-capable desktop backend; optional `tesseract` for OCR and `zbarimg` for QR decoding |
+| Music player controls | An MPRIS-capable player on the session D-Bus; no playerctl dependency |
+| Native browser history/bookmarks | Python 3 with its standard SQLite module; existing local browser profiles |
+| Image conversions / PDF text | `vips` (preferred) or `ffmpeg` with WebP support; `pdftotext` for PDFs |
+| Image palettes | Built-in Pixbuf image decoder support |
 | Currency conversion | curl and an internet connection |
 | Alarm sounds | `paplay` with a working PulseAudio-compatible server and the freedesktop sound theme, or `canberra-gtk-play` as fallback |
 | Open notes in Obsidian | An existing Obsidian vault and Obsidian's URI handler |

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Draft {
     Timer(u64),
+    Pomodoro(u64),
     AlarmAfter(u64),
     Alarm { hour: i32, minute: i32 },
 }
@@ -14,6 +15,8 @@ pub struct Reminder {
     pub title: String,
     pub due: i64,
     pub alarm: bool,
+    #[serde(default)]
+    pub pomodoro: bool,
 }
 
 fn duration(text: &str) -> Option<u64> {
@@ -52,6 +55,17 @@ fn seconds(value: f64) -> Option<u64> {
 
 pub fn parse(text: &str) -> Option<Result<Draft, &'static str>> {
     let input = text.trim().to_ascii_lowercase();
+    if input == "pomodoro" {
+        return Some(Ok(Draft::Pomodoro(1500)));
+    }
+    if let Some(rest) = input.strip_prefix("pomodoro ") {
+        return Some(
+            duration(rest)
+                .filter(|s| *s <= 86400)
+                .map(Draft::Pomodoro)
+                .ok_or("Try pomodoro 25m · maximum 24 hours"),
+        );
+    }
     let (alarm, mut rest) = [
         ("set a timer", false),
         ("set timer", false),
@@ -141,6 +155,7 @@ pub fn duration_label(seconds: u64) -> String {
 impl Draft {
     pub fn label(&self) -> String {
         match self {
+            Self::Pomodoro(seconds) => format!("Pomodoro · {}", duration_label(*seconds)),
             Self::Timer(seconds) => format!("Timer · {}", duration_label(*seconds)),
             Self::AlarmAfter(seconds) => format!("Alarm · in {}", duration_label(*seconds)),
             Self::Alarm { hour, minute } => format!("Alarm · {hour:02}:{minute:02}"),
@@ -149,7 +164,7 @@ impl Draft {
 
     pub fn create(&self, now: &glib::DateTime) -> Result<Reminder, String> {
         let due = match self {
-            Self::Timer(seconds) | Self::AlarmAfter(seconds) => now
+            Self::Timer(seconds) | Self::Pomodoro(seconds) | Self::AlarmAfter(seconds) => now
                 .to_unix()
                 .checked_add(*seconds as i64)
                 .ok_or("Timer is too long")?,
@@ -186,7 +201,8 @@ impl Draft {
             id: glib::uuid_string_random().to_string(),
             title: self.label(),
             due,
-            alarm: !matches!(self, Self::Timer(_)),
+            alarm: matches!(self, Self::AlarmAfter(_) | Self::Alarm { .. }),
+            pomodoro: matches!(self, Self::Pomodoro(_)),
         })
     }
 }
@@ -209,6 +225,20 @@ mod tests {
     use super::*;
     #[test]
     fn timer_and_alarm_queries() {
+        assert_eq!(parse("pomodoro"), Some(Ok(Draft::Pomodoro(1500))));
+        assert_eq!(parse("pomodoro 25m"), Some(Ok(Draft::Pomodoro(1500))));
+        assert!(parse("pomodoro 0").unwrap().is_err());
+        assert!(parse("pomodoro 25h").unwrap().is_err());
+        assert!(parse("pomodorox").is_none());
+        let old: Reminder =
+            serde_json::from_str(r#"{"id":"old","title":"Timer","due":100,"alarm":false}"#)
+                .unwrap();
+        assert!(!old.pomodoro);
+        let now = glib::DateTime::now_utc().unwrap();
+        let p = Draft::Pomodoro(1500).create(&now).unwrap();
+        assert!(p.pomodoro);
+        assert!(!p.alarm);
+        assert_eq!(p.due - now.to_unix(), 1500);
         for (input, seconds) in [
             ("timer 5m", 300),
             ("set timer for 30 seconds", 30),
