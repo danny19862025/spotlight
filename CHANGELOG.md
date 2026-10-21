@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Expanded the in-app Guide to 103 topics with password/network/file/appearance setup, secure-pin migration and expiry, a visual screenshot-to-note workflow walkthrough, and local AI setup and context review.
 - Added an Argon2id/XChaCha20-Poly1305 clipboard vault, master-password unlock, encrypted legacy-pin migration, one-hour pin expiry and session locking, and sensitive clipboard offers.
 - Changed the KDE paste queue to an in-memory pipe so secure pins never become plaintext temporary files.
 - Added a visual no-code workflow editor, real import-free WASM schedules, and a local screenshot/OCR/translation/note runner.
