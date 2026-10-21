@@ -18,6 +18,14 @@ optdepends=(
   'wl-clipboard: Wayland clipboard tools'
   'kde-cli-tools: KDE desktop integration'
   'tesseract: local OCR'
+  'rbw: cached Bitwarden password lookup'
+  'keepassxc: local KeePassXC password lookup'
+  'gnupg: file encryption and decryption'
+  'bind: DNS lookup with dig'
+  'iputils: ping probes'
+  'iproute2: listening ports and routes'
+  'networkmanager: Wi-Fi scan and toggle'
+  'plasma-workspace: wallpaper and accent commands'
 )
 # Pin the upstream release commit; update together with pkgver for each release.
 _commit=42ceb963be1fb37aae3c0ca052814eda78e88e45

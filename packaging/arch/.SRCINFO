@@ -28,6 +28,14 @@ pkgbase = spotlight
 	optdepends = wl-clipboard: Wayland clipboard tools
 	optdepends = kde-cli-tools: KDE desktop integration
 	optdepends = tesseract: local OCR
+	optdepends = rbw: cached Bitwarden password lookup
+	optdepends = keepassxc: local KeePassXC password lookup
+	optdepends = gnupg: file encryption and decryption
+	optdepends = bind: DNS lookup with dig
+	optdepends = iputils: ping probes
+	optdepends = iproute2: listening ports and routes
+	optdepends = networkmanager: Wi-Fi scan and toggle
+	optdepends = plasma-workspace: wallpaper and accent commands
 	options = !debug
 	source = git+https://github.com/danny19862025/spotlight.git#commit=42ceb963be1fb37aae3c0ca052814eda78e88e45
 	sha256sums = SKIP

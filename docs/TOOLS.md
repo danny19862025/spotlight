@@ -185,3 +185,37 @@ On KDE, `python3 tests/window_controls_smoke.py` additionally creates three disp
 Todos live in `$XDG_DATA_HOME/spotlight/todos.md` (default `~/.local/share/spotlight/todos.md`) and can be edited externally. Updates reject stale selected lines. Layouts and Pomodoro deadlines use Spotlight's existing private store. Window restore uses KWin and never launches missing apps. Disconnected-screen geometry is clamped to a connected screen. Pomodoro uses a separate inhibitor from manual Caffeinate, released at expiry or cancellation; Spotlight must run to ring or inhibit sleep.
 
 The queue requires the optional Qt 6 / KDE GuiAddons helper (`sh native/build-pastequeue.sh`), automatically built by `install.sh` when those development packages are available. KDE Wayland background access uses KSystemClipboard / data-control. The paste queue offers text or PNG images and advances on clipboard content requests. Paste at least 150 ms apart; a clipboard-reading utility other than Klipper can also consume an entry. Copying something else cancels the queue. Queue payloads use private temporary runtime files, removed when Spotlight exits or the queue is replaced; pins remain unchanged. `python3 tests/workflow_smoke.py` uses temporary XDG data, one disposable KWin window, real Caffeinate, and a separate GTK paste destination; it restores the previous text/image clipboard afterward.
+
+## Passwords, network, file vault, and appearance
+
+| Command | Result |
+| --- | --- |
+| `pass github` | Copy a password on Enter; choose rbw or KeePassXC |
+| `rbw github`, `rbw UUID` | Use rbw's existing local Bitwarden cache; its pinentry handles unlock |
+| `keepass setup` | Save database and optional key-file paths through a local picker |
+| `keepass Group/GitHub` | Ask for the database password, then copy the exact entry's password |
+| `ping 8.8.8.8` | Three probes, four-second deadline, including packet-loss statistics |
+| `dig github.com` | DNS report with a bounded timeout |
+| `my ports`, `my routes` | Local listening TCP/UDP sockets and IPv4 routes |
+| `scan wifi` | Scan nearby Wi-Fi networks with nmcli; does not connect to one |
+| `encrypt file ~/Documents/report.pdf` | Passphrase-protected AES-256 GPG file beside the original |
+| `decrypt file ~/Documents/report.pdf.gpg` | Restore a separate plaintext file; original ciphertext kept |
+| `checksum file ~/Downloads/archive.zip` | Preview and copy a SHA-256 checksum |
+| `shred file ~/Documents/disposable.txt` | Confirm three overwrite passes, one zero pass, and removal |
+| `wallpaper next` | Cycle local images and remember the last successfully applied one |
+| `wallpaper ~/Pictures/photo.jpg` | Apply a local image through KDE Plasma |
+| `accent blue`, `accent #635BDB` | Change KDE and Spotlight accent while preserving other Spotlight colors |
+
+Password queries prepare actions without reading secrets or opening an unlock prompt while typing. Install and configure [rbw](https://github.com/doy/rbw#configuration) separately and log in before using its cached vault. Spotlight never invokes login or sync; rbw's own background synchronization remains governed by its settings (`sync_interval = 0` disables its periodic sync). Ambiguous names fail rather than choosing a password; use the entry UUID. KeePassXC uses an exact entry path in a password-protected database, with an optional key file. Key-only and hardware-key databases are not supported by this prompt. Database and key-file paths are the only KeePassXC settings Spotlight saves. See the [KeePassXC CLI manual](https://github.com/keepassxreboot/keepassxc/blob/develop/docs/man/keepassxc-cli.1.adoc).
+
+Passwords are copied as text with KDE's `x-kde-passwordManagerHint=secret` metadata. Compatible clipboard managers can exclude them from history; other managers may retain copies. Spotlight clears its clipboard offer after 30 seconds if it still owns that exact offer, preserving anything copied afterward. Keep Spotlight running until expiry. Password results are never previewed, cached, logged, or saved to favorites or usage history. CLI errors are redacted. Master passwords and encryption passphrases go through stdin, never process arguments or saved settings. Cancel and Escape clear the prompt.
+
+Network results load after the normal search debounce. Ping contacts the named host; dig uses your configured DNS resolver; Wi-Fi scanning uses your wireless adapter. These commands intentionally use the requested network and have no cloud fallback. Ports/routes are local snapshots. Enter on the first row opens a full copyable preview; later rows copy individual lines. Results show up to 60 lines inline and retain a bounded full report. Ctrl+R refreshes. Missing tools or unavailable adapters produce an error. Dependencies: iputils `ping`, bind/dnsutils `dig`, iproute2 `ss`/`ip`, and NetworkManager `nmcli`.
+
+File actions also appear under Tab/Ctrl+K in Search File and Recent. Omitting a file path opens a picker. Encryption asks for the passphrase twice, uses GnuPG's symmetric AES-256 mode, and saves `filename.gpg`; decryption removes `.gpg`/`.pgp` or appends `.decrypted`. Existing destinations are refused, including symlinks. Outputs are published only after success with mode 0600. Originals remain unchanged. Back up the passphrase separately; Spotlight does not retain it. [GnuPG documents the symmetric encryption command](https://gnupg.org/documentation/manuals/gnupg/Operational-GPG-Commands.html).
+
+Shredding requires a separate confirmation and rejects directories, symlinks, devices, multiple hard links, and files changed since confirmation. It overwrites an open file descriptor before removing the selected path. Overwriting does **not** guarantee physical erasure on SSDs, copy-on-write filesystems, snapshots, backups, or journalled data; use disk encryption for protection at rest. Interrupted shredding may leave a partially overwritten file. These file operations time out after two minutes.
+
+Wallpaper cycling searches `~/Pictures/Wallpapers`, `~/.local/share/wallpapers`, and `wallpapers` under XDG data directories (default `/usr/share/wallpapers`), up to 500 images and five directory levels. It skips symlinks, sorts paths, wraps at the end, and downloads nothing. KDE may apply the image to multiple desktops/monitors according to its wallpaper tool. Accent names include blue, red, green, purple, orange, pink and teal; six-digit HEX also works. Appearance changes run only on Enter. They require KDE's `plasma-apply-wallpaperimage` / `plasma-apply-colorscheme`. The launcher keeps its current background, text and selection colors.
+
+`python3 tests/systemtools_smoke.py` verifies password CLI argument contracts and redacted failures with fake vaults, bounded network reports, real GPG encryption/decryption and wrong-passphrase handling in a temporary GNUPGHOME, real checksums, and shredding of a disposable fixture. Appearance CLIs are stubbed. With a desktop display it also checks native confirmation cancellation, passphrase mismatch/cancellation, database setup, sensitive MIME formats, privacy, file menus, and saved appearance state. It does not access a personal vault, change your wallpaper/accent, or copy passwords to your desktop clipboard.

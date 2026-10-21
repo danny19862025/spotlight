@@ -191,6 +191,10 @@ export PATH="$HOME/.local/bin:$PATH"
 
 | Feature | What it needs |
 | --- | --- |
+| Password lookup | `rbw` with a previously logged-in cached vault and graphical pinentry, or `keepassxc-cli` with a password-protected local database; run `keepass setup` for database/key-file paths |
+| Network tools | `ping` (iputils), `dig` (bind-tools/dnsutils), `ss`/`ip` (iproute2), and NetworkManager's `nmcli` for Wi-Fi scanning |
+| File vault actions | `gpg` for encryption/decryption; GNU coreutils `sha256sum` and `shred` |
+| Wallpaper and accent | KDE Plasma's `plasma-apply-wallpaperimage` and `plasma-apply-colorscheme`; local wallpaper images |
 | Clipboard paste queue | Qt 6 Gui and KDE GuiAddons development packages to build `native/build-pastequeue.sh`; installer builds/installs this optional helper when available |
 | Clipboard history | KDE Klipper for text and saved images (image database version 3); current images can also be read directly from the clipboard |
 | Offline dictionary | Local dictd-format dictionaries; `gzip` for compressed files, or an optional loopback dictd server; see [setup](OFFLINE.md) |

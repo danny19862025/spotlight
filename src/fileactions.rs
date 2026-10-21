@@ -201,6 +201,27 @@ impl Ui {
             });
             menu.append(&button);
         }
+        if path.is_file() {
+            for tool in [
+                crate::systemtools::FileTool::Encrypt,
+                crate::systemtools::FileTool::Decrypt,
+                crate::systemtools::FileTool::Checksum,
+                crate::systemtools::FileTool::Shred,
+            ] {
+                let button = gtk::Button::with_label(tool.title());
+                let target = path.clone();
+                let ui = self.clone();
+                let pop = popup.clone();
+                button.connect_clicked(move |_| {
+                    pop.popdown();
+                    ui.execute_system_tool(crate::systemtools::Operation::File(
+                        tool,
+                        target.clone(),
+                    ));
+                });
+                menu.append(&button);
+            }
+        }
         if crate::search::image_path(&path) {
             for tool in [
                 crate::localtools::Tool::Compress,

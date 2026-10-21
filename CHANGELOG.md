@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added password copying through rbw and KeePassXC CLI, with on-demand unlock, sensitive clipboard metadata, 30-second expiry, and no saved password-query history.
+- Added inline ping, DNS, listening-port, routing-table and Wi-Fi scan results with copyable lines.
+- Added GPG encryption/decryption, SHA-256 checksums, and confirmed shredding to search and file action menus. Encryption keeps originals and never replaces existing outputs.
+- Added local wallpaper cycling and KDE/Spotlight accent commands.
 - Fixed content search skipping every match when the searched folder sat under a `build`, `target`, `dist`, `vendor`, or `node_modules` directory, and made the calendar backend, file-manager detection, and login autostart work on systems without `/usr/bin/python3` or `/bin/true`.
 - Fixed the image tool checks on systems without the optional gdk-pixbuf WebP loader, where the WebP round-trip is now skipped instead of failing.
 - Fixed Nix package inputs, added a dependency lock and WebP loader cache, and kept login startup pointed at the packaged GTK wrapper.

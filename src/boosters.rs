@@ -11,6 +11,7 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Query {
+    System(crate::systemtools::Query),
     Productivity(crate::productivity::Query),
     Dev(crate::devtools::Query),
     Advanced(crate::advanced::Query),
@@ -31,6 +32,9 @@ pub enum Query {
 }
 impl Query {
     pub fn parse(text: &str) -> Option<Self> {
+        if let Some(query) = crate::systemtools::Query::parse(text) {
+            return Some(Self::System(query));
+        }
         if let Some(query) = crate::devkit::Query::parse(text) {
             return Some(Self::Kit(query));
         }
@@ -106,6 +110,7 @@ impl Query {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
+    System(crate::systemtools::Operation),
     Productivity(crate::productivity::Operation),
     Dev(crate::devtools::Operation),
     Advanced(crate::advanced::Operation),
@@ -247,6 +252,7 @@ pub fn run_input(
 
 pub fn fetch(query: &Query) -> Result<Vec<Entry>, String> {
     match query {
+        Query::System(query) => crate::systemtools::fetch(query),
         Query::Productivity(query) => crate::productivity::fetch(query),
         Query::Dev(query) => crate::devtools::fetch(query),
         Query::Advanced(query) => crate::advanced::fetch(query),
@@ -633,6 +639,7 @@ fn decode_definitions(word: &str, output: &str) -> Result<Vec<Entry>, String> {
 
 pub fn execute(operation: Operation) -> Result<String, String> {
     match operation {
+        Operation::System(_) => Err("This command must be opened in Spotlight".into()),
         Operation::Kit(_) => Err("This action needs the Spotlight window".into()),
         Operation::Local(_) => Err("This command must be opened in Spotlight".into()),
         Operation::Productivity(_) => Err("This command must be opened in Spotlight".into()),

@@ -46,7 +46,7 @@ Architecture: $arch
 Maintainer: Danny <danny19862025@users.noreply.github.com>
 Installed-Size: $(du -sk "$stage/usr" | cut -f1)
 Depends: $deps, libgtk-4-1 (>= 4.10)
-Suggests: python3, curl, ripgrep, xdg-utils, wl-clipboard, tesseract-ocr
+Suggests: python3, curl, ripgrep, xdg-utils, wl-clipboard, tesseract-ocr, keepassxc, gnupg, dnsutils, iputils-ping, iproute2, network-manager, plasma-workspace
 Homepage: https://github.com/danny19862025/spotlight
 Description: Keyboard-first native Linux productivity launcher
  Search applications and files, calculate, and manage notes and snippets.

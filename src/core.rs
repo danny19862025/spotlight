@@ -47,6 +47,9 @@ pub struct Store {
     pub pinned_clips: Vec<crate::clipboard::Pinned>,
     pub project_context: Option<PathBuf>,
     pub dotfiles_repo: Option<PathBuf>,
+    pub keepass_database: Option<PathBuf>,
+    pub keepass_key_file: Option<PathBuf>,
+    pub last_wallpaper: Option<PathBuf>,
     pub commands: crate::customization::Preferences,
 }
 impl Store {

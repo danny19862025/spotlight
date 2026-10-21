@@ -45,6 +45,8 @@ mod reminder;
 mod search;
 mod shortcut;
 mod snippets;
+mod systemtools;
+mod systemtools_ui;
 mod texttools;
 mod theme;
 mod todos;
@@ -3021,6 +3023,63 @@ impl Ui {
         ));
         for (title, description, query) in [
             (
+                "Copy Password",
+                "Bitwarden via rbw or a local KeePassXC database",
+                "pass ",
+            ),
+            (
+                "KeePassXC Setup",
+                "Choose database and optional key file",
+                "keepass setup",
+            ),
+            (
+                "Ping Host",
+                "Three bounded probes · inline, copyable results",
+                "ping ",
+            ),
+            ("DNS Lookup", "Look up a hostname with dig", "dig "),
+            (
+                "Listening Ports",
+                "Local listening TCP and UDP sockets",
+                "my ports",
+            ),
+            (
+                "Scan Wi-Fi",
+                "Nearby networks via NetworkManager",
+                "scan wifi",
+            ),
+            (
+                "Network Routes",
+                "Local routing table via iproute2",
+                "my routes",
+            ),
+            (
+                "Encrypt File",
+                "GPG encryption · original kept",
+                "encrypt file",
+            ),
+            (
+                "Decrypt File",
+                "GPG decryption · original kept",
+                "decrypt file",
+            ),
+            ("Checksum File", "SHA-256 file checksum", "checksum file"),
+            (
+                "Shred File",
+                "Permanent overwrite and removal · confirmation required",
+                "shred file",
+            ),
+            (
+                "Next Wallpaper",
+                "Cycle local wallpapers on KDE",
+                "wallpaper next",
+            ),
+            (
+                "Accent Color",
+                "Set KDE and Spotlight accent",
+                "accent blue",
+            ),
+            (
                 "IP Addresses",
                 "Local and public IP addresses · ip or my ip",
                 "ip",
@@ -3525,8 +3584,16 @@ impl Ui {
                     Some(op) => Action::Booster(op),
                     None => Action::Noop,
                 };
+                let id = if matches!(
+                    query,
+                    boosters::Query::System(systemtools::Query::Password(..))
+                ) {
+                    format!("booster:password:{n}")
+                } else {
+                    format!("booster:{query:?}:{n}")
+                };
                 let mut row = item(
-                    &format!("booster:{query:?}:{n}"),
+                    &id,
                     &e.title,
                     &e.detail,
                     match &query {
@@ -4237,7 +4304,11 @@ impl Ui {
             && let Some(command) = boosters::Query::parse(q)
             && calendar::parse(q).is_none()
         {
-            let web = results.into_iter().find(|i| i.id == "web");
+            let sensitive = matches!(
+                command,
+                boosters::Query::System(systemtools::Query::Password(..))
+            );
+            let web = results.into_iter().find(|i| i.id == "web" && !sensitive);
             results = self.booster_items(command);
             if let Some(web) = web {
                 results.push(web);
@@ -4798,6 +4869,17 @@ impl Ui {
     }
     fn favorite(self: &Rc<Self>) {
         if let Some(i) = self.selected() {
+            if i.id.starts_with("booster:password:")
+                || matches!(
+                    i.action,
+                    Action::Booster(boosters::Operation::System(
+                        systemtools::Operation::Password(..)
+                    ))
+                )
+            {
+                self.error("Password lookups are kept out of saved favorites and history");
+                return;
+            }
             let mut store = self.store.borrow_mut();
             if store.favorites.contains(&i.id) {
                 store.favorites.retain(|x| x != &i.id);

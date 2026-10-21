@@ -3,6 +3,10 @@ use gtk::{gdk, gio, glib, prelude::*};
 use std::{rc::Rc, sync::mpsc, time::Duration};
 impl Ui {
     pub(super) fn execute_booster(self: &Rc<Self>, operation: boosters::Operation) {
+        if let boosters::Operation::System(op) = operation {
+            self.execute_system_tool(op);
+            return;
+        }
         if let boosters::Operation::Kit(op) = operation {
             self.execute_kit(op);
             return;

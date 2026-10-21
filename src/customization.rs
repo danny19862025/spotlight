@@ -2,6 +2,7 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 
 pub const CATEGORIES: &[(&str, &str)] = &[
+    ("passwords", "Password managers"),
     ("containers", "Docker and Podman"),
     ("fonts", "Fonts"),
     ("calendar", "Calendars and meeting availability"),
@@ -154,6 +155,11 @@ pub fn category(query: &str) -> Option<&'static str> {
     let text = query.trim().to_ascii_lowercase();
     let head = text.split_whitespace().next().unwrap_or("");
     Some(match head {
+        "pass" | "password" | "rbw" | "keepass" | "keepassxc" => "passwords",
+        "ping" | "dig" | "wallpaper" | "accent" => "system",
+        "scan" if text == "scan wifi" || text == "scan wi-fi" => "system",
+        "my" if text == "my ports" || text == "my routes" => "system",
+        "encrypt" | "decrypt" | "checksum" | "shred" => "files",
         "docker" | "podman" | "logs" => "containers",
         "font" | "fonts" => "fonts",
         "calendar" | "events" | "event" | "meet" => "calendar",

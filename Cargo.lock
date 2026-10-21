@@ -720,6 +720,7 @@ version = "0.4.0"
 dependencies = [
  "gtk4",
  "ignore",
+ "libc",
  "qrcodegen",
  "serde",
  "serde_json",
