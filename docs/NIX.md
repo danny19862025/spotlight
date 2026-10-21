@@ -14,7 +14,8 @@ spotlight
 ```
 
 The flake supports x86_64-linux and aarch64-linux. It pins Nixpkgs to an
-immutable revision in flake.nix and uses Cargo.lock checksums. GTK runtime
+immutable revision in flake.nix and verifies vendored Cargo dependencies with
+the flake's cargoHash. Update that hash when Cargo.lock changes. GTK runtime
 schemas, Python, curl, ripgrep, and xdg-utils are supplied by its wrapper.
 
 For declarative NixOS configurations, add this input:
@@ -49,6 +50,11 @@ nix build
 nix develop
 ```
 
-Run these checks on a machine with Nix installed before treating the package
-as verified. Desktop fixture tests remain opt-in. Both x86_64-linux and
-aarch64-linux are declared targets; neither has been verified locally yet.
+The fork contributor reports a successful x86_64-linux build on NixOS 26.11;
+aarch64-linux is still unverified. Run these checks on your target system.
+Desktop fixture tests remain opt-in.
+
+Content-search exclusions are relative to each searched folder, so unit tests
+can run under the Nix sandbox's /build without changing TMPDIR. The opener
+fixture resolves `true` through PATH instead of requiring /bin/true. The pixbuf
+loaders cache includes the separate WebP loader for checks and the launcher.

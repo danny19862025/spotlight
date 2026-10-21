@@ -199,85 +199,98 @@ fn content_stream(
     cancel: &AtomicBool,
     on_match: &mut impl FnMut(Entry),
 ) -> Result<Vec<Entry>, String> {
-    let mut child = Command::new("rg")
-        .args([
-            "--no-config",
-            "--json",
-            "--line-number",
-            "--smart-case",
-            "--fixed-strings",
-            "--max-filesize",
-            "1M",
-            "--max-count",
-            "3",
-            "--max-depth",
-            "12",
-            "--threads",
-            "2",
-            "--glob",
-            "!**/node_modules/**",
-            "--glob",
-            "!**/target/**",
-            "--glob",
-            "!**/vendor/**",
-            "--glob",
-            "!**/build/**",
-            "--glob",
-            "!**/dist/**",
-            "--",
-            text,
-        ])
-        .args(roots)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Content search requires ripgrep (rg): {e}"))?;
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::sync_channel(8);
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            if v["type"] == "match" && tx.send(v).is_err() {
-                break;
-            }
-        }
-    });
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut rows = Vec::new();
     let mut limited = false;
-    while Instant::now() < deadline && !cancel.load(Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(40)) {
-            Ok(v) => {
-                if let Some(row) = content_row(&v) {
-                    on_match(row.clone());
-                    rows.push(row);
-                }
-                if rows.len() >= 100 {
-                    limited = true;
+    for root in roots {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Search cancelled".into());
+        }
+        // Search every root from its own directory. ripgrep matches the
+        // exclusion globs against the path it prints, so searching from the
+        // root keeps them scoped to the searched tree instead of matching a
+        // "build" or "target" directory in the absolute path of the root.
+        let mut child = Command::new("rg")
+            .current_dir(root)
+            .args([
+                "--no-config",
+                "--json",
+                "--line-number",
+                "--smart-case",
+                "--fixed-strings",
+                "--max-filesize",
+                "1M",
+                "--max-count",
+                "3",
+                "--max-depth",
+                "12",
+                "--threads",
+                "2",
+                "--glob",
+                "!**/node_modules/**",
+                "--glob",
+                "!**/target/**",
+                "--glob",
+                "!**/vendor/**",
+                "--glob",
+                "!**/build/**",
+                "--glob",
+                "!**/dist/**",
+                "--",
+                text,
+                ".",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Content search requires ripgrep (rg): {e}"))?;
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::sync_channel(8);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if v["type"] == "match" && tx.send(v).is_err() {
                     break;
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        });
+        while Instant::now() < deadline && !cancel.load(Ordering::Relaxed) {
+            match rx.recv_timeout(Duration::from_millis(40)) {
+                Ok(v) => {
+                    if let Some(row) = content_row(&v, root) {
+                        on_match(row.clone());
+                        rows.push(row);
+                    }
+                    if rows.len() >= 100 {
+                        limited = true;
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
         }
-    }
-    if Instant::now() >= deadline {
-        limited = true;
-    }
-    // Closing the receiver also releases a bounded reader if the result cap was hit.
-    drop(rx);
-    if limited || cancel.load(Ordering::Relaxed) {
-        let _ = child.kill();
-    }
-    let status = child.wait().map_err(|e| e.to_string())?;
-    if cancel.load(Ordering::Relaxed) {
-        return Err("Search cancelled".into());
-    }
-    if !limited && !status.success() && status.code() != Some(1) {
-        return Err("ripgrep could not search this folder · check read permissions".into());
+        if Instant::now() >= deadline {
+            limited = true;
+        }
+        // Closing the receiver also releases a bounded reader if the result cap was hit.
+        drop(rx);
+        if limited || cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+        }
+        let status = child.wait().map_err(|e| e.to_string())?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Search cancelled".into());
+        }
+        if !limited && !status.success() && status.code() != Some(1) {
+            return Err("ripgrep could not search this folder · check read permissions".into());
+        }
+        if limited {
+            break;
+        }
     }
     if rows.is_empty() {
         rows.push(boosters::hint("No content matches", "Literal text · smart case · hidden, ignored, binary, and files larger than 1 MiB are skipped"));
@@ -290,9 +303,11 @@ fn content_stream(
     }
     Ok(rows)
 }
-fn content_row(v: &serde_json::Value) -> Option<Entry> {
+fn content_row(v: &serde_json::Value, root: &Path) -> Option<Entry> {
     let data = &v["data"];
-    let path = PathBuf::from(data["path"]["text"].as_str()?);
+    let relative = data["path"]["text"].as_str()?;
+    let relative = relative.strip_prefix("./").unwrap_or(relative);
+    let path = root.join(relative);
     let line = data["line_number"].as_u64()?;
     let text = data["lines"]["text"]
         .as_str()?
@@ -582,6 +597,65 @@ mod tests {
             "No content matches"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn content_search_scopes_exclusions_to_each_root() {
+        let fixture = std::env::temp_dir().join(format!(
+            "spotlight-content-ancestors-{}",
+            std::process::id()
+        ));
+        let root = fixture.join("build/target/dist/vendor/node_modules/My Notes");
+        fs::create_dir_all(&root).unwrap();
+        let note = root.join("café note.md");
+        fs::write(&note, "fixture needle\n").unwrap();
+        for excluded in ["build", "target", "dist", "vendor", "node_modules"] {
+            fs::create_dir_all(root.join(excluded)).unwrap();
+            fs::write(root.join(excluded).join("output.txt"), "fixture needle").unwrap();
+        }
+        let rows = content(std::slice::from_ref(&root), "fixture needle").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].detail, note.display().to_string());
+        let Some(Operation::Preview { open, .. }) = &rows[0].operation else {
+            panic!("Content matches must open the original file");
+        };
+        assert_eq!(
+            open.as_deref(),
+            Some(gio::File::for_path(&note).uri().as_str())
+        );
+        fs::remove_dir_all(fixture).unwrap();
+    }
+    #[test]
+    fn content_search_shares_result_limit_across_roots() {
+        let fixture =
+            std::env::temp_dir().join(format!("spotlight-content-multiple-{}", std::process::id()));
+        let roots = [fixture.join("first"), fixture.join("second")];
+        for root in &roots {
+            fs::create_dir_all(root).unwrap();
+            fs::write(root.join("note.md"), "fixture needle\n").unwrap();
+        }
+        let rows = content(&roots, "fixture needle").unwrap();
+        assert_eq!(rows.len(), 2);
+        for (row, root) in rows.iter().zip(&roots) {
+            assert_eq!(row.detail, root.join("note.md").display().to_string());
+        }
+        for n in 0..110 {
+            fs::write(roots[1].join(format!("{n}.md")), "fixture needle\n").unwrap();
+        }
+        // Reaching the cap must stop before attempting another root.
+        let mut capped_roots = roots.to_vec();
+        capped_roots.push(fixture.join("missing"));
+        let mut streamed = 0;
+        let rows = content_stream(
+            &capped_roots,
+            "fixture needle",
+            &AtomicBool::new(false),
+            &mut |_| streamed += 1,
+        )
+        .unwrap();
+        assert_eq!(streamed, 100);
+        assert_eq!(rows.len(), 101);
+        assert_eq!(rows.last().unwrap().title, "Search limit reached");
+        fs::remove_dir_all(fixture).unwrap();
     }
     #[test]
     fn xbel_recency_private_and_missing_files() {

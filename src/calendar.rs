@@ -316,7 +316,7 @@ pub struct Event {
 
 pub fn desktop(request: serde_json::Value) -> Result<String, String> {
     boosters::run_input(
-        Command::new("/usr/bin/python3").args(["-c", include_str!("../native/calendar.py")]),
+        Command::new("python3").args(["-c", include_str!("../native/calendar.py")]),
         12,
         Some(request.to_string().as_bytes()),
     )

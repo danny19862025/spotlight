@@ -567,12 +567,19 @@ mod tests {
         let compressed = compress_capture(&original).unwrap();
         assert!(compressed.starts_with(b"RIFF"));
         assert_eq!(&compressed[8..12], b"WEBP");
-        let loader = gtk::gdk_pixbuf::PixbufLoader::new();
-        use gtk::prelude::*;
-        loader.write(&compressed).unwrap();
-        loader.close().unwrap();
-        let decoded = loader.pixbuf().unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (2048, 1200));
+        // Reading WebP back needs the optional gdk-pixbuf WebP loader, which
+        // distributions ship separately, so only round-trip when it is there.
+        let webp = Pixbuf::formats()
+            .iter()
+            .any(|format| format.name().as_deref() == Some("webp"));
+        if webp {
+            let loader = gtk::gdk_pixbuf::PixbufLoader::new();
+            use gtk::prelude::*;
+            loader.write(&compressed).unwrap();
+            loader.close().unwrap();
+            let decoded = loader.pixbuf().unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (2048, 1200));
+        }
         assert_eq!(fs::read(&source).unwrap(), original);
         for tool in [Tool::Compress, Tool::Resize, Tool::Webp] {
             let Outcome::File(output) = transform(tool, &source).unwrap() else {
@@ -580,10 +587,12 @@ mod tests {
             };
             assert_ne!(output, source);
             assert!(output.is_file());
-            let (_, w, h) = Pixbuf::file_info(&output).unwrap();
-            if tool == Tool::Resize {
-                assert!(w <= 1920 && h <= 1080);
-                assert!((w as f64 / h as f64 - 2048. / 1200.).abs() < 0.01);
+            if tool == Tool::Resize || webp {
+                let (_, w, h) = Pixbuf::file_info(&output).unwrap();
+                if tool == Tool::Resize {
+                    assert!(w <= 1920 && h <= 1080);
+                    assert!((w as f64 / h as f64 - 2048. / 1200.).abs() < 0.01);
+                }
             }
             let Outcome::File(second) = transform(tool, &source).unwrap() else {
                 panic!()

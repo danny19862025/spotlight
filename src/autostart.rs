@@ -13,6 +13,14 @@ fn location() -> PathBuf {
         .join("autostart/spotlight.desktop")
 }
 fn executable() -> Result<PathBuf, String> {
+    // A packaged launcher can point at its own wrapper so the autostart entry
+    // starts the wrapped process with the environment it needs.
+    if let Some(path) = std::env::var_os("SPOTLIGHT_EXECUTABLE") {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            return Ok(path);
+        }
+    }
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let home = crate::core::home();
     let wrapper = home.join(".local/bin/spotlight");

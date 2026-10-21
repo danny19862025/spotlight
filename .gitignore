@@ -1,5 +1,6 @@
 # Build output
 /target/
+/result
 /examples/plugins/*/plugin.wasm
 
 # Runtime data and private local configuration (never distribute)

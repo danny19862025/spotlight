@@ -1,5 +1,12 @@
 # Release notes
 
+## Unreleased
+
+- Fixed content search skipping every match when the searched folder sat under a `build`, `target`, `dist`, `vendor`, or `node_modules` directory, and made the calendar backend, file-manager detection, and login autostart work on systems without `/usr/bin/python3` or `/bin/true`.
+- Fixed the image tool checks on systems without the optional gdk-pixbuf WebP loader, where the WebP round-trip is now skipped instead of failing.
+- Fixed Nix package inputs, added a dependency lock and WebP loader cache, and kept login startup pointed at the packaged GTK wrapper.
+- Kept the content-search result and time limits shared across all searched folders.
+
 ## 0.4.0 — 2026-10-20
 
 - Added direct MPRIS music controls and local browser history/bookmark search across Firefox, Chrome, Chromium, and Brave profiles.
