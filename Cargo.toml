@@ -13,6 +13,11 @@ wasmi = { version = "2.0", default-features = false, features = ["stable", "std"
 qrcodegen = "1.8.0"
 ignore = "0.4"
 libc = "0.2"
+argon2 = { version = "0.5", features = ["zeroize"] }
+chacha20poly1305 = "0.10"
+base64 = "0.22"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 wat = "1"

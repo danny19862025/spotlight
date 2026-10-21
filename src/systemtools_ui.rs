@@ -94,7 +94,7 @@ impl Ui {
             }
         }
     }
-    fn secret_prompt(
+    pub(super) fn secret_prompt(
         self: &Rc<Self>,
         title: &str,
         repeat: bool,
@@ -340,7 +340,7 @@ impl Ui {
             glib::ControlFlow::Break
         });
     }
-    fn copy_secret(&self, secret: Secret) {
+    pub(super) fn copy_secret(&self, secret: Secret) {
         let clipboard = self.window.clipboard();
         let provider = secret_provider(secret);
         if let Err(e) = clipboard.set_content(Some(&provider)) {

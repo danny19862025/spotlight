@@ -30,6 +30,7 @@ impl Query {
 }
 #[derive(Clone, Debug)]
 pub enum Operation {
+    Context(String),
     SummarizeClipboard,
     Plugin(pluginstore::Plugin),
 }
@@ -59,15 +60,23 @@ pub fn fetch(query: &Query) -> Result<Vec<Entry>, String> {
             }
             Ok(rows)
         }
-        Query::Ai(input) if input.is_empty() || input == "summarize clipboard" => Ok(vec![entry(
+        Query::Ai(input) if input == "summarize clipboard" => Ok(vec![entry(
             "Summarize clipboard locally",
             "Enter to read clipboard text · local Ollama only · no model downloads",
             "Local AI",
             Op::Productivity(Operation::SummarizeClipboard),
         )]),
-        Query::Ai(_) => Ok(vec![hint(
-            "Local AI commands",
-            "ai summarize clipboard · ai models",
+        Query::Ai(input) => Ok(vec![entry(
+            "Ask local AI with context",
+            "Review selected project, window titles and todos before sending · local Ollama only",
+            "Local AI",
+            Op::Productivity(Operation::Context(
+                input
+                    .strip_prefix("ask ")
+                    .or_else(|| input.strip_prefix("context "))
+                    .unwrap_or(if input == "context" { "" } else { input })
+                    .into(),
+            )),
         )]),
     }
 }

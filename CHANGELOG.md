@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added an Argon2id/XChaCha20-Poly1305 clipboard vault, master-password unlock, encrypted legacy-pin migration, one-hour pin expiry and session locking, and sensitive clipboard offers.
+- Changed the KDE paste queue to an in-memory pipe so secure pins never become plaintext temporary files.
+- Added a visual no-code workflow editor, real import-free WASM schedules, and a local screenshot/OCR/translation/note runner.
+- Added context-aware local AI with selectable project summaries, open windows and todos, an exact context preview, and explicit Send/Copy/Save actions.
+
 - Added password copying through rbw and KeePassXC CLI, with on-demand unlock, sensitive clipboard metadata, 30-second expiry, and no saved password-query history.
 - Added inline ping, DNS, listening-port, routing-table and Wi-Fi scan results with copyable lines.
 - Added GPG encryption/decryption, SHA-256 checksums, and confirmed shredding to search and file action menus. Encryption keeps originals and never replaces existing outputs.

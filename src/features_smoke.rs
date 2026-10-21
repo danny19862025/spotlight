@@ -92,18 +92,19 @@ fn native_ui() {
                 }
                 2=>{
                     window("Open With").unwrap().close();
+                    ui.secure_vault.lock().unwrap().unlock(b"features fixture master password",true).unwrap();
                     let selected=item("clip:fixture","Fixture pin","","edit-paste-symbolic","Text",Action::Copy("A pinned fixture\nsecond line".into()));ui.pin_clipboard(&selected);
-                    assert_eq!(Store::load().unwrap().pinned_clips.len(),1);
-                    ui.clips.borrow_mut().clear();assert!(ui.clipboard_items().iter().any(|r|r.id.starts_with("pinned:")));
+                    assert!(Store::load().unwrap().pinned_clips.is_empty());assert_eq!(ui.secure_vault.lock().unwrap().entries(securevault::now()).unwrap().len(),1);
+                    ui.clips.borrow_mut().clear();assert!(ui.clipboard_items().iter().any(|r|r.id.starts_with("vault-pin:")));
                     let selected=item("clip-image:fixture","Fixture image","","image-x-generic-symbolic","Image",Action::ClipboardImage(root.join("ocr.png")));ui.pin_clipboard(&selected);
-                    assert_eq!(Store::load().unwrap().pinned_clips.len(),2);
+                    assert_eq!(ui.secure_vault.lock().unwrap().entries(securevault::now()).unwrap().len(),2);
                     ui.page(Page::Root);ui.search.set_text("clip images");assert!(*ui.page.borrow()==Page::Clipboard);
                 }
                 3=>{
-                    assert!(!ui.visible.borrow().is_empty());assert!(ui.visible.borrow().iter().all(|r|matches!(r.action,Action::ClipboardImage(_)|Action::ClipboardTexture(_))));
-                    ui.search.set_text("clip pinned");assert_eq!(ui.visible.borrow().len(),2);
-                    let image=ui.visible.borrow().iter().find(|r|matches!(r.action,Action::ClipboardImage(_))).unwrap().clone();let Action::ClipboardImage(path)=&image.action else{unreachable!()};let path=path.clone();
-                    use std::os::unix::fs::PermissionsExt;assert_eq!(fs::metadata(&path).unwrap().permissions().mode()&0o777,0o600);ui.pin_clipboard(&image);assert!(!path.exists());assert_eq!(Store::load().unwrap().pinned_clips.len(),1);
+                    assert!(!ui.visible.borrow().is_empty());assert!(ui.visible.borrow().iter().all(|r|matches!(r.action,Action::ClipboardImage(_)|Action::ClipboardTexture(_)|Action::VaultPin(_))));
+                    ui.search.set_text("clip pinned");assert_eq!(ui.visible.borrow().len(),3);
+                    let image=ui.visible.borrow().iter().find(|r|r.badge=="Secure image").unwrap().clone();
+                    use std::os::unix::fs::PermissionsExt;let path=core::data_dir().join("clipboard-vault.json");assert_eq!(fs::metadata(&path).unwrap().permissions().mode()&0o777,0o600);ui.pin_clipboard(&image);assert!(Store::load().unwrap().pinned_clips.is_empty());assert_eq!(ui.secure_vault.lock().unwrap().entries(securevault::now()).unwrap().len(),1);
                     ui.clear_clipboard();let dialog=confirmation();confirmation_button(&dialog,"confirmation-cancel").emit_clicked();assert_eq!(clear_count(&root),2);
                 }
                 4=>{

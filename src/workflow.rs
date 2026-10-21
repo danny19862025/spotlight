@@ -34,7 +34,19 @@ fn row(id: &str, title: &str, subtitle: &str, op: Operation) -> Item {
 }
 impl Ui {
     pub(super) fn workflow_rows(&self, query: &str) -> Vec<Item> {
-        let mut rows = Vec::new();
+        let mut rows = self.automation_rows(query);
+        if ["vault", "clip vault"].contains(&query)
+            && self.store.borrow().commands.enabled("clipboard")
+        {
+            rows.push(item(
+                "clipboard-vault",
+                "Secure Clipboard Vault",
+                "Unlock encrypted pins or lock the vault · one-hour expiry",
+                "changes-prevent-symbolic",
+                "Vault",
+                Action::Vault,
+            ));
+        }
         if self.store.borrow().commands.enabled("saved") {
             rows.extend(todos::rows(query));
         }
@@ -123,7 +135,7 @@ impl Ui {
                     row(
                         "clip-queue-stop",
                         "Stop clipboard queue",
-                        "Leave the current entry on the clipboard",
+                        "Stop the secure queue and clear its current offer",
                         Operation::StopQueue,
                     ),
                 );
@@ -291,6 +303,20 @@ impl Ui {
             .set_visible(state.is_some() || self.caffeinate.borrow().is_some());
     }
     fn queue_editor(self: &Rc<Self>) {
+        if !self.secure_vault.try_lock().is_ok_and(|v| v.unlocked()) {
+            self.open_clipboard_vault();
+            self.error("Unlock the encrypted vault, then reopen the paste queue");
+            return;
+        }
+        let secure_pins = {
+            let vault = self.secure_vault.lock().unwrap();
+            vault
+                .snapshot(crate::securevault::now())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(id, expires, payload)| payload.ok().map(|p| (id, expires, p)))
+                .collect::<Vec<_>>()
+        };
         let dialog = gtk::Window::builder()
             .title("Clipboard paste queue")
             .application(&self.window.application().unwrap())
@@ -299,27 +325,28 @@ impl Ui {
             .default_width(560)
             .default_height(480)
             .build();
+        dialog.set_widget_name("secure-paste-queue");
         let panel = gtk::Box::new(gtk::Orientation::Vertical, 10);
         panel.add_css_class("editor");
         let info = gtk::Label::new(Some(
-            "Pins paste from top to bottom. Use ↑ / ↓ to reorder; uncheck to skip.",
+            "Encrypted pins paste from top to bottom. Use ↑ / ↓ to reorder; uncheck to skip.",
         ));
         info.set_wrap(true);
         panel.append(&info);
         let list = gtk::ListBox::new();
         list.set_selection_mode(gtk::SelectionMode::None);
-        for pin in &self.store.borrow().pinned_clips {
+        for (id, _, pin) in &secure_pins {
             let row = gtk::ListBoxRow::new();
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             let label: String = match pin {
-                crate::clipboard::Pinned::Text { value, .. } => value
+                crate::securevault::Payload::Text(value) => value
                     .lines()
                     .next()
                     .unwrap_or("Empty text")
                     .chars()
                     .take(65)
                     .collect(),
-                crate::clipboard::Pinned::Image { .. } => "Pinned image".into(),
+                crate::securevault::Payload::Image(_) => "Encrypted image".into(),
             };
             let check = gtk::CheckButton::with_label(&label);
             check.set_active(true);
@@ -340,7 +367,7 @@ impl Ui {
                 line.append(&button);
             }
             // A stable pin ID on the row keeps reorder independent of the persistent pin order.
-            row.set_widget_name(pin.id());
+            row.set_widget_name(id);
             row.set_child(Some(&line));
             list.append(&row);
         }
@@ -360,6 +387,23 @@ impl Ui {
         let ui = self.clone();
         let d = dialog.clone();
         start.connect_clicked(move |_| {
+            let mut available = match ui
+                .secure_vault
+                .lock()
+                .map_err(|_| "Vault interrupted".to_string())
+                .and_then(|vault| vault.snapshot(crate::securevault::now()))
+            {
+                Ok(snapshot) => snapshot
+                    .into_iter()
+                    .filter_map(|(id, expires, payload)| {
+                        payload.ok().map(|payload| (id, (payload, expires)))
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+                Err(e) => {
+                    status.set_text(&e);
+                    return;
+                }
+            };
             let mut pins = Vec::new();
             let mut index = 0;
             while let Some(row) = list.row_at_index(index) {
@@ -370,18 +414,17 @@ impl Ui {
                     .downcast::<gtk::CheckButton>()
                     .unwrap()
                     .is_active()
-                    && let Some(pin) = ui
-                        .store
-                        .borrow()
-                        .pinned_clips
-                        .iter()
-                        .find(|p| p.id() == row.widget_name())
                 {
-                    pins.push(pin.clone());
+                    if let Some(pin) = available.remove(row.widget_name().as_str()) {
+                        pins.push(pin);
+                    } else {
+                        status.set_text("A selected pin expired or was removed");
+                        return;
+                    }
                 }
                 index += 1;
             }
-            match pastequeue::Queue::new(ui.window.clipboard(), &pins) {
+            match pastequeue::Queue::new_secure(&pins) {
                 Ok(q) => {
                     if let Some(old) = ui.paste_queue.borrow_mut().take() {
                         old.stop();

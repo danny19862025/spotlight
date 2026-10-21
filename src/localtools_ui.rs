@@ -164,6 +164,18 @@ impl Ui {
         screenshot: bool,
         result: Result<Option<gtk::gdk_pixbuf::Pixbuf>, String>,
     ) {
+        let workflow = if screenshot {
+            self.workflow_capture.borrow_mut().take()
+        } else {
+            None
+        };
+        if let Some(callback) = workflow {
+            self.measurement_request.borrow_mut().take();
+            self.measuring_screen.set(false);
+            self.window.present();
+            callback(result);
+            return;
+        }
         if !screenshot {
             self.finish_measurement(result);
             return;
@@ -345,6 +357,11 @@ mod tests {
         let completed = done.clone();
         app.connect_activate(move |app| {
             let ui = build_with_mode(app, true);
+            ui.secure_vault
+                .lock()
+                .unwrap()
+                .unlock(b"features fixture master password", true)
+                .unwrap();
             let root = root.clone();
             let done = done.clone();
             let source = root.join("ocr.png");
@@ -369,9 +386,24 @@ mod tests {
             ] {
                 assert!(button(&capture, label).is_visible());
             }
-            let pins = ui.store.borrow().pinned_clips.len();
+            let pins = ui
+                .secure_vault
+                .lock()
+                .unwrap()
+                .entries(securevault::now())
+                .unwrap()
+                .len();
             button(&capture, "Pin").emit_clicked();
-            assert_eq!(Store::load().unwrap().pinned_clips.len(), pins + 1);
+            assert!(Store::load().unwrap().pinned_clips.is_empty());
+            assert_eq!(
+                ui.secure_vault
+                    .lock()
+                    .unwrap()
+                    .entries(securevault::now())
+                    .unwrap()
+                    .len(),
+                pins + 1
+            );
             button(&capture, "Copy Image").emit_clicked();
             let copy_done = Rc::new(Cell::new(false));
             let copied = copy_done.clone();
@@ -537,7 +569,7 @@ mod tests {
         let done = Rc::new(Cell::new(false));
         let completed = done.clone();
         app.connect_activate(move |app| {
-            let ui=build_with_mode(app,true);let root=root.clone();let done=done.clone();
+            let ui=build_with_mode(app,true);ui.secure_vault.lock().unwrap().unlock(b"features fixture master password",true).unwrap();let root=root.clone();let done=done.clone();
             let guard_app=app.clone();glib::timeout_add_local_once(Duration::from_secs(25),move ||guard_app.quit());
             glib::MainContext::default().spawn_local(async move {
                 ui.capture_screen(true);
@@ -552,7 +584,7 @@ mod tests {
                 let result=wait_window("Extracted text").await;
                 let view=test_widget(result.upcast_ref(),&|w|w.is::<gtk::TextView>()).unwrap().downcast::<gtk::TextView>().unwrap();let buffer=view.buffer();
                 assert_eq!(buffer.text(&buffer.start_iter(),&buffer.end_iter(),false).trim(),"https://example.test/same-capture");button(&result,"Close").emit_clicked();
-                tab_actions(&capture);let count=ui.store.borrow().pinned_clips.len();button(&capture,"Pin").emit_clicked();assert_eq!(Store::load().unwrap().pinned_clips.len(),count+1);
+                tab_actions(&capture);let count=ui.secure_vault.lock().unwrap().entries(securevault::now()).unwrap().len();button(&capture,"Pin").emit_clicked();assert!(Store::load().unwrap().pinned_clips.is_empty());assert_eq!(ui.secure_vault.lock().unwrap().entries(securevault::now()).unwrap().len(),count+1);
                 let image=test_widget(capture.upcast_ref(),&|w|w.is::<gtk::Picture>()).unwrap().downcast::<gtk::Picture>().unwrap().paintable().unwrap().downcast::<gdk::Texture>().unwrap();
                 let png=image.save_to_png_bytes().to_vec();let expected=(image.width(),image.height());
                 let (tx,rx)=std::sync::mpsc::channel();std::thread::spawn(move ||{let _=tx.send(localtools::compress_capture(&png));});

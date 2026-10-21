@@ -1,10 +1,13 @@
-use crate::{clipboard::Pinned, core};
-use gtk::{gdk, gio, glib, prelude::*};
+use crate::core;
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+#[cfg(test)]
+use gtk::gio;
+use gtk::glib;
+#[cfg(test)]
+use gtk::prelude::*;
 use std::{
     cell::{Cell, RefCell},
-    fs,
     io::{BufRead, BufReader, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::{Child, Command, Stdio},
     rc::Rc,
@@ -13,75 +16,83 @@ use std::{
 };
 
 pub struct Queue {
-    directory: PathBuf,
     helper: PathBuf,
     child: RefCell<Option<Child>>,
+    memory: RefCell<Option<crate::systemtools::Secret>>,
+    input: RefCell<Option<std::process::ChildStdin>>,
     pub active: Cell<bool>,
     pub ready: Cell<bool>,
     pub error: RefCell<Option<String>>,
 }
 impl Queue {
-    pub fn new(_: gdk::Clipboard, pins: &[Pinned]) -> Result<Rc<Self>, String> {
-        if pins.is_empty() {
-            return Err("Pin clipboard entries first, then select at least one".into());
+    #[cfg(test)]
+    pub fn new(
+        _: gtk::gdk::Clipboard,
+        pins: &[crate::clipboard::Pinned],
+    ) -> Result<Rc<Self>, String> {
+        let pins = pins
+            .iter()
+            .map(|pin| match pin {
+                crate::clipboard::Pinned::Text { value, .. } => Ok((
+                    crate::securevault::Payload::Text(value.clone()),
+                    crate::securevault::now() + 3600,
+                )),
+                crate::clipboard::Pinned::Image { path, .. } => {
+                    let texture = gtk::gdk::Texture::from_file(&gio::File::for_path(path))
+                        .map_err(|e| e.to_string())?;
+                    Ok((
+                        crate::securevault::Payload::Image(texture.save_to_png_bytes().to_vec()),
+                        crate::securevault::now() + 3600,
+                    ))
+                }
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Self::new_secure(&pins)
+    }
+    pub fn new_secure(pins: &[(crate::securevault::Payload, i64)]) -> Result<Rc<Self>, String> {
+        if pins.is_empty() || pins.len() > 50 {
+            return Err("Select between 1 and 50 encrypted pins".into());
         }
         let installed = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|p| p.join("spotlight-pastequeue")));
-        let helper=[std::env::var_os("SPOTLIGHT_PASTEQUEUE_HELPER").map(PathBuf::from),installed,Some(core::home().join(".local/lib/spotlight/spotlight-pastequeue")),Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/native/spotlight-pastequeue"))].into_iter().flatten().find(|p|p.is_file()).ok_or("Missing paste queue helper · build with sh native/build-pastequeue.sh and install it beside Spotlight")?;
-        let directory = core::data_dir()
-            .join("runtime")
-            .join(format!("pastequeue-{}", glib::uuid_string_random()));
-        fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-        let prepare = (|| {
-            let mut manifest = Vec::new();
-            let mut total = 0;
-            for (index, pin) in pins.iter().enumerate() {
-                let (mime, bytes) = match pin {
-                    Pinned::Text { value, .. } => {
-                        ("text/plain;charset=utf-8", value.as_bytes().to_vec())
-                    }
-                    Pinned::Image { path, .. } => {
-                        let texture = gdk::Texture::from_file(&gio::File::for_path(path))
-                            .map_err(|e| format!("Cannot load pinned image: {e}"))?;
-                        ("image/png", texture.save_to_png_bytes().as_ref().to_vec())
-                    }
-                };
-                total += bytes.len();
-                if total > 67_108_864 {
-                    return Err("Queue exceeds 64 MiB; select fewer pins".into());
+        let helper = [
+            std::env::var_os("SPOTLIGHT_PASTEQUEUE_HELPER").map(PathBuf::from),
+            installed,
+            Some(core::home().join(".local/lib/spotlight/spotlight-pastequeue")),
+            Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("target/native/spotlight-pastequeue"),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file())
+        .ok_or("Build the updated paste queue helper with sh native/build-pastequeue.sh")?;
+        let mut total = 0;
+        let mut manifest = Vec::new();
+        for (payload, expires) in pins {
+            let (mime, bytes) = match payload {
+                crate::securevault::Payload::Text(text) => {
+                    ("text/plain;charset=utf-8", text.as_bytes())
                 }
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(directory.join(index.to_string()))
-                    .map_err(|e| e.to_string())?;
-                file.write_all(&bytes).map_err(|e| e.to_string())?;
-                manifest.push(mime);
+                crate::securevault::Payload::Image(bytes) => ("image/png", bytes.as_slice()),
+            };
+            total += bytes.len();
+            if total > 67_108_864 {
+                return Err("Queue exceeds 64 MiB".into());
             }
-            if manifest.len() > 50 {
-                return Err("Choose at most 50 pins".into());
-            }
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(directory.join("queue.json"))
-                .map_err(|e| e.to_string())?;
-            file.write_all(&serde_json::to_vec(&manifest).unwrap())
-                .map_err(|e| e.to_string())
-        })();
-        if let Err(e) = prepare {
-            let _ = fs::remove_dir_all(&directory);
-            return Err(e);
+            manifest
+                .push(serde_json::json!({"mime":mime,"data":B64.encode(bytes),"expires":expires}));
         }
+        let mut encoded =
+            serde_json::to_vec(&manifest).map_err(|_| "Cannot prepare secure queue")?;
+        encoded.push(b'\n');
         Ok(Rc::new(Self {
-            directory,
             helper,
             child: RefCell::new(None),
+            memory: RefCell::new(Some(crate::systemtools::Secret(encoded))),
+            input: RefCell::new(None),
             active: Cell::new(true),
             ready: Cell::new(false),
             error: RefCell::new(None),
@@ -91,8 +102,9 @@ impl Queue {
         if self.child.borrow().is_some() {
             return;
         }
+        let memory = self.memory.borrow_mut().take();
         let result = Command::new(&self.helper)
-            .arg(self.directory.join("queue.json"))
+            .arg("--stdin-json")
             .env(
                 "QT_QPA_PLATFORM",
                 if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -113,6 +125,16 @@ impl Queue {
                 return;
             }
         };
+        let mut input = child.stdin.take().unwrap();
+        let (input_tx, input_rx) = mpsc::channel();
+        if let Some(memory) = memory {
+            std::thread::spawn(move || {
+                let _ = input.write_all(&memory.0);
+                let _ = input_tx.send(input);
+            });
+        } else {
+            let _ = input_tx.send(input);
+        }
         let output = child.stdout.take().unwrap();
         *self.child.borrow_mut() = Some(child);
         let (tx, rx) = mpsc::channel();
@@ -129,6 +151,9 @@ impl Queue {
             let Some(queue) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+            if let Ok(input) = input_rx.try_recv() {
+                *queue.input.borrow_mut() = Some(input);
+            }
             loop {
                 match rx.try_recv() {
                     Ok(line) if line == "ready" => queue.ready.set(true),
@@ -171,10 +196,10 @@ impl Queue {
     }
     pub fn stop(&self) {
         self.active.set(false);
-        if let Some(child) = self.child.borrow_mut().as_mut()
-            && let Some(input) = child.stdin.as_mut()
-        {
+        if let Some(input) = self.input.borrow_mut().as_mut() {
             let _ = input.write_all(b"stop\n");
+        } else if let Some(child) = self.child.borrow_mut().as_mut() {
+            let _ = child.kill();
         }
     }
 }
@@ -184,6 +209,5 @@ impl Drop for Queue {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let _ = fs::remove_dir_all(&self.directory);
     }
 }

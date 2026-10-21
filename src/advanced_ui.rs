@@ -17,6 +17,7 @@ impl Ui {
         }
         if let boosters::Operation::Productivity(op) = &operation {
             match op {
+                crate::productivity::Operation::Context(question) => self.context_ai(question),
                 crate::productivity::Operation::SummarizeClipboard => self.summarize_clipboard(),
                 crate::productivity::Operation::Plugin(plugin) => {
                     self.plugin_details(plugin.clone())

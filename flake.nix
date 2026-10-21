@@ -21,7 +21,7 @@
           pname = "spotlight";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
           src = pkgs.lib.cleanSource ./.;
-          cargoHash = "sha256-b3Kzb9OUPH2FGrY2CKew9RUDs4phRWXv98Rv2XSovcU=";
+          cargoHash = "sha256-BuWTx7ohs8cDYRFMY8yklAPjbE5j20ULbrtTaIz2vxg=";
 
           nativeBuildInputs = [ pkgs.pkg-config pkgs.wrapGAppsHook4 ];
           buildInputs = [

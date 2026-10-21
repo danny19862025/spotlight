@@ -89,10 +89,10 @@ fn native_workflows() {
             assert!((actual.x-original.x).abs()<3. && (actual.y-original.y).abs()<3. && (actual.width-original.width).abs()<3.,"Restored fixture: {actual:?} vs {original:?}");
             fs::write(root.join("fixture-window-id"),&target_id).unwrap();
             // The queue editor's up button must change actual paste order.
-            ui.store.borrow_mut().pinned_clips=vec![clipboard::Pinned::Text{id:"first".into(),value:"First α".into()},clipboard::Pinned::Text{id:"second".into(),value:"Second β".into()}];
+            let second_id={let mut vault=ui.secure_vault.lock().unwrap();vault.unlock(b"queue fixture master password",true).unwrap();let second=vault.add(&securevault::Payload::Text("Second β".into()),securevault::now()).unwrap();vault.add(&securevault::Payload::Text("First α".into()),securevault::now()).unwrap();second};
             launch_query(&ui,"clip queue");
             let dialog=gtk::Window::list_toplevels().into_iter().filter_map(|w|w.downcast::<gtk::Window>().ok()).find(|w|w.title().as_deref()==Some("Clipboard paste queue")).unwrap();
-            let second=test_widget(dialog.upcast_ref(),&|w|w.widget_name()=="second").unwrap();
+            let second=test_widget(dialog.upcast_ref(),&|w|w.widget_name()==second_id).unwrap();
             let up=test_widget(&second,&|w|w.clone().downcast::<gtk::Button>().is_ok_and(|b|b.label().as_deref()==Some("↑"))).unwrap().downcast::<gtk::Button>().unwrap();up.emit_clicked();
             pause(350).await;
             test_widget(dialog.upcast_ref(),&|w|w.clone().downcast::<gtk::Button>().is_ok_and(|b|b.label().as_deref()==Some("Start paste queue"))).unwrap().downcast::<gtk::Button>().unwrap().emit_clicked();
@@ -112,8 +112,8 @@ fn native_workflows() {
             assert_eq!(fixture(&root,"paste","after-image").await,"After image");pause(200).await;
             assert!(!images.active.get());
             images.stop();
-            assert_eq!(fixture(&root,"paste","stopped-last").await,"After image");
-            let q=pastequeue::Queue::new(ui.window.clipboard(),&ui.store.borrow().pinned_clips).unwrap();q.publish();pause(600).await;
+            assert_eq!(fixture(&root,"paste","stopped-last").await,"");
+            let q=pastequeue::Queue::new(ui.window.clipboard(),&[clipboard::Pinned::Text{id:"first".into(),value:"First α".into()},clipboard::Pinned::Text{id:"second".into(),value:"Second β".into()}]).unwrap();q.publish();pause(600).await;
             let replacement=pastequeue::Queue::new(ui.window.clipboard(),&[clipboard::Pinned::Text{id:"external".into(),value:"External clipboard replacement".into()}]).unwrap();replacement.publish();pause(700).await;
             assert!(!q.active.get(),"External clipboard ownership cancels queue");q.stop();
             let focus_id=target_id.clone();worker(move ||windowing::focus(&focus_id)).await.unwrap();pause(300).await;

@@ -64,7 +64,7 @@ pub(super) fn topics(app: &str) -> Vec<Step> {
             "Clipboard history · text and images",
             "Open Clipboard History to reuse text or images from KDE Klipper. Search the history, select an item, and press Enter to copy it. Paste with Ctrl+V in the destination app. Ctrl+K → Preview Image opens a larger image.",
             "Clipboard History\nEnter → copy\nCtrl+V → paste in another app",
-            "Use Ctrl+K to pin an entry or clear history. Search clip text, clip images, or clip pinned to filter. Spotlight reads Klipper history; explicitly pinned text and images are saved in Spotlight.",
+            "Use Ctrl+K to pin an entry or clear history. Search clip text, clip images, or clip pinned to filter. Spotlight reads Klipper history; explicit pins are encrypted in Spotlight’s master-password vault and expire after one hour.",
             Some(("Open Clipboard History", Open(Page::Clipboard))),
         ),
         topic(
@@ -275,7 +275,7 @@ pub(super) fn topics(app: &str) -> Vec<Step> {
             "Clipboard paste queue",
             "Open clip queue to select and reorder pins. Start paste queue hides Spotlight; use Ctrl+V or your app's normal paste shortcut repeatedly to paste one entry at a time.",
             "clip queue\nclip queue stop",
-            "Text and PNG pins work. Wait at least 150 ms between pastes. Queue advances on clipboard reads; other clipboard-reading utilities can consume entries. Klipper is told to ignore queued entries. Copying new content stops the queue; saved pins stay intact.",
+            "Unlock the Clipboard Vault first. Text and PNG pins are sent to the helper over an in-memory pipe. Locking, expiry, or stopping clears its current offer. Wait at least 150 ms between pastes. Queue advances on clipboard reads; other clipboard-reading utilities can consume entries. Klipper is told to ignore queued entries. Copying new content stops the queue; saved pins stay intact.",
             Some(("Review paste queue", Search("clip queue".into()))),
         ),
         topic(
@@ -505,7 +505,7 @@ pub(super) fn topics(app: &str) -> Vec<Step> {
             "Pin clipboard text and images",
             "Open Clipboard History, select an entry, and use Ctrl+K → Pin entry. Pinned entries remain available after Klipper evicts them. Select a pin and use Ctrl+K to unpin it.",
             "Clipboard History → select entry → Ctrl+K → Pin entry\nclip pinned\nCtrl+K → Unpin entry",
-            "Spotlight saves up to 50 pins. Image pins are private local copies. Clearing Klipper history keeps your Spotlight pins; unpin entries separately when you no longer need them.",
+            "Use vault first to choose a master password and migrate old pins. Up to 50 text/image pins are encrypted at rest and expire after one hour. Unlock to view or copy them. Clearing Klipper history keeps unexpired vault pins.",
             Some(("Open clipboard", Open(Page::Clipboard))),
         ),
         topic(
@@ -825,6 +825,33 @@ pub(super) fn topics(app: &str) -> Vec<Step> {
             Some((
                 "Preview next wallpaper action",
                 Search("wallpaper next".into()),
+            )),
+        ),
+        topic(
+            "Clipboard",
+            "Secure Clipboard Vault · encrypted expiring pins",
+            "Search vault and press Enter to choose a master password or unlock. The first successful unlock encrypts old text/image pins before clearing their plaintext pin records. In Clipboard History, Ctrl+K pins or unpins an entry; clip pinned shows unlocked secure pins.",
+            "vault\nclip vault\nclip pinned\nClipboard History → Ctrl+K → Pin entry",
+            "Each pin expires after one hour, and unlock sessions last at most an hour. Open the vault control again to lock it. Saved contents use authenticated encryption; the master password is never saved. Keep the password separately. Clipboard offers are marked sensitive and clear after 30 seconds if still owned. Existing external backups and Klipper history are outside migration.",
+            Some(("Find Clipboard Vault", Search("vault".into()))),
+        ),
+        topic(
+            "Automation",
+            "Workflow Builder · visual chains saved as WASM",
+            "Search workflow, open the builder, choose action cards and reorder them with ↑/↓. Save WASM creates a local executable workflow module. Save & Run opens its runner; review the chain and press Run. Screenshot → OCR → Translate → Note captures, translates locally, and creates a quick note.",
+            "workflow\nworkflow run name\nworkflow edit name\nworkflow delete name",
+            "Choose from Input, Clipboard, Screenshot, OCR, Translate, Summarize, Save Note and Copy. Translation/summarization require local Ollama with cloud disabled; OCR requires Tesseract. Intermediate text/images remain in memory. Only Copy and Save Note publish output. Failed or cancelled chains stop; earlier saved notes remain. Modules use a separate, import-free workflow ABI with bounded execution.",
+            Some(("Open workflow commands", Search("workflow".into()))),
+        ),
+        topic(
+            "Local AI",
+            "Context-aware AI · project, windows and todos",
+            "Select a project with the project command, then type ai ask followed by a question. The dialog previews the exact snapshot: project file names and root README/manifests, open KWin window titles, and local/project todos.md. Toggle sources or refresh, then Send locally.",
+            "project ~/Projects/foo\nai ask what should I work on next?\nai context\nai summarize clipboard",
+            "Context is bounded and skips hidden, ignored and symlinked project files. Model calls remain on the verified local-only Ollama endpoint, with no cloud fallback. Opening or refreshing context sends nothing to the model. Questions and answers stay out of saved history/favorites; Copy answer and Save answer as note are explicit actions.",
+            Some((
+                "Prepare a context question",
+                Search("ai ask what should I work on next?".into()),
             )),
         ),
         topic(

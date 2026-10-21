@@ -155,6 +155,8 @@ pub fn category(query: &str) -> Option<&'static str> {
     let text = query.trim().to_ascii_lowercase();
     let head = text.split_whitespace().next().unwrap_or("");
     Some(match head {
+        "workflow" | "workflows" => "extensions",
+        "vault" => "clipboard",
         "pass" | "password" | "rbw" | "keepass" | "keepassxc" => "passwords",
         "ping" | "dig" | "wallpaper" | "accent" => "system",
         "scan" if text == "scan wifi" || text == "scan wi-fi" => "system",
@@ -213,6 +215,8 @@ pub fn item_category(item: &Item) -> Option<&'static str> {
         return Some("saved");
     }
     match &item.action {
+        Action::Automation(_) => Some("extensions"),
+        Action::Vault | Action::VaultPin(_) => Some("clipboard"),
         Action::Workflow(op) => Some(op.category()),
         Action::Query(q) => category(q),
         Action::Extension(_) | Action::RunExtension { .. } | Action::Script(_) => {

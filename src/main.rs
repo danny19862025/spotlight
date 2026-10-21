@@ -1,6 +1,8 @@
 mod about;
 mod advanced;
 mod advanced_ui;
+mod automation;
+mod automation_ui;
 mod autostart;
 mod boosters;
 mod caffeinate;
@@ -8,9 +10,12 @@ mod calendar;
 mod clipboard;
 mod clipimage;
 mod color;
+mod contextai;
 mod core;
 mod currency;
 mod customization;
+#[cfg(test)]
+mod deep_features_smoke;
 mod desktop;
 mod devkit;
 mod devkit_ui;
@@ -43,6 +48,8 @@ mod productivity_smoke;
 mod quicknote;
 mod reminder;
 mod search;
+mod securevault;
+mod securevault_ui;
 mod shortcut;
 mod snippets;
 mod systemtools;
@@ -124,6 +131,9 @@ impl Page {
 }
 #[derive(Clone)]
 enum Action {
+    Automation(automation_ui::Command),
+    Vault,
+    VaultPin(String),
     Workflow(workflow::Operation),
     Extension(extensions::Manifest),
     RunExtension {
@@ -203,6 +213,9 @@ fn item(id: &str, title: &str, subtitle: &str, icon: &str, badge: &str, action: 
     }
 }
 struct Ui {
+    vault_clipboard: RefCell<Option<gdk::ContentProvider>>,
+    workflow_capture: RefCell<Option<WorkflowCapture>>,
+    secure_vault: std::sync::Arc<std::sync::Mutex<securevault::Vault>>,
     window: gtk::ApplicationWindow,
     search: gtk::Entry,
     list: gtk::ListBox,
@@ -279,6 +292,7 @@ struct ContentSession {
     rows: Vec<boosters::Entry>,
     done: bool,
 }
+type WorkflowCapture = Box<dyn FnOnce(Result<Option<gtk::gdk_pixbuf::Pixbuf>, String>)>;
 impl Drop for ContentSession {
     fn drop(&mut self) {
         self.cancel
@@ -610,6 +624,15 @@ impl Ui {
         });
     }
     fn capture_clipboard_image(self: &Rc<Self>) {
+        if self
+            .window
+            .clipboard()
+            .formats()
+            .contain_mime_type("x-kde-passwordManagerHint")
+        {
+            self.clip_current.borrow_mut().take();
+            return;
+        }
         let generation = self.clip_generation.get().wrapping_add(1);
         self.clip_generation.set(generation);
         self.clip_current.borrow_mut().take();
@@ -2445,6 +2468,30 @@ impl Ui {
     }
     fn root(&self) -> Vec<Item> {
         let mut out = self.apps.borrow().clone();
+        out.push(item(
+            "local-ai-context",
+            "Context-aware Local AI",
+            "Review selected project, windows and todos before sending",
+            "system-search-symbolic",
+            "Local AI",
+            Action::Query("ai context".into()),
+        ));
+        out.push(item(
+            "clipboard-vault",
+            "Secure Clipboard Vault",
+            "Master password · encrypted pins expire after one hour",
+            "changes-prevent-symbolic",
+            "Vault",
+            Action::Vault,
+        ));
+        out.push(item(
+            "workflow-builder",
+            "Workflow Builder",
+            "Visual action chains saved as local WASM",
+            "view-list-symbolic",
+            "Workflow",
+            Action::Automation(automation_ui::Command::Builder(None)),
+        ));
         let mut help = item(
             "walkthrough",
             "Spotlight Guide",
@@ -3589,6 +3636,11 @@ impl Ui {
                     boosters::Query::System(systemtools::Query::Password(..))
                 ) {
                     format!("booster:password:{n}")
+                } else if matches!(
+                    query,
+                    boosters::Query::Productivity(productivity::Query::Ai(_))
+                ) {
+                    format!("booster:context-ai:{n}")
                 } else {
                     format!("booster:{query:?}:{n}")
                 };
@@ -3948,11 +4000,14 @@ impl Ui {
                 .clipboard_items()
                 .into_iter()
                 .filter(|i| match clip_kind {
-                    "text" => matches!(i.action, Action::Copy(_)),
-                    "images" => matches!(
-                        i.action,
-                        Action::ClipboardImage(_) | Action::ClipboardTexture(_)
-                    ),
+                    "text" => matches!(i.action, Action::Copy(_)) || i.badge == "Secure text",
+                    "images" => {
+                        i.badge == "Secure image"
+                            || matches!(
+                                i.action,
+                                Action::ClipboardImage(_) | Action::ClipboardTexture(_)
+                            )
+                    }
                     "pinned" => clipboard::is_pinned(&i.id),
                     _ => true,
                 })
@@ -4162,6 +4217,11 @@ impl Ui {
                 || q == "layout"
                 || q.starts_with("layout ")
                 || q.starts_with("clip queue")
+                || q == "workflow"
+                || q == "workflows"
+                || q.starts_with("workflow ")
+                || q == "vault"
+                || q == "clip vault"
             {
                 results = workflow_rows;
             } else {
@@ -4307,6 +4367,7 @@ impl Ui {
             let sensitive = matches!(
                 command,
                 boosters::Query::System(systemtools::Query::Password(..))
+                    | boosters::Query::Productivity(productivity::Query::Ai(_))
             );
             let web = results.into_iter().find(|i| i.id == "web" && !sensitive);
             results = self.booster_items(command);
@@ -4621,7 +4682,10 @@ impl Ui {
             store.emoji_skin_tone = Some(tone);
             store.emoji_tones.insert(emoji::base(symbol), tone);
         }
-        if !i.id.starts_with("booster:") && !i.id.starts_with("extension-result:") {
+        if !i.id.starts_with("booster:")
+            && !i.id.starts_with("vault-pin:")
+            && !i.id.starts_with("extension-result:")
+        {
             let mut store = self.store.borrow_mut();
             let n = store.usage.entry(i.id.clone()).or_default();
             *n = n.saturating_add(1);
@@ -4629,6 +4693,18 @@ impl Ui {
             self.save();
         }
         let result: Result<(), String> = match i.action {
+            Action::Automation(command) => {
+                self.execute_automation(command);
+                return;
+            }
+            Action::Vault => {
+                self.open_clipboard_vault();
+                return;
+            }
+            Action::VaultPin(id) => {
+                self.copy_vault_pin(&id);
+                return;
+            }
             Action::Workflow(op) => {
                 self.workflow(op);
                 return;
@@ -4869,6 +4945,14 @@ impl Ui {
     }
     fn favorite(self: &Rc<Self>) {
         if let Some(i) = self.selected() {
+            if i.id.starts_with("booster:context-ai:") {
+                self.error("Local AI questions are excluded from saved favorites");
+                return;
+            }
+            if i.id.starts_with("vault-pin:") {
+                self.error("Secure pins are excluded from saved favorites");
+                return;
+            }
             if i.id.starts_with("booster:password:")
                 || matches!(
                     i.action,
@@ -5936,6 +6020,11 @@ fn build_with_mode(app: &gtk::Application, test: bool) -> Rc<Ui> {
     let (width, height) = store.interface.dimensions();
     interface::fit_window(&window, width, height);
     let ui = Rc::new(Ui {
+        vault_clipboard: RefCell::new(None),
+        workflow_capture: RefCell::new(None),
+        secure_vault: std::sync::Arc::new(std::sync::Mutex::new(securevault::Vault::new(
+            core::data_dir().join("clipboard-vault.json"),
+        ))),
         window,
         search,
         list,
@@ -6006,10 +6095,14 @@ fn build_with_mode(app: &gtk::Application, test: bool) -> Rc<Ui> {
         alarm_label: RefCell::new(None),
         event_editor: RefCell::new(None),
     });
+    ui.vault_expiry_clock();
     let weak_queue_ui = Rc::downgrade(&ui);
     app.connect_shutdown(move |_| {
         if let Some(ui) = weak_queue_ui.upgrade() {
             ui.paste_queue.borrow_mut().take();
+            if let Ok(mut vault) = ui.secure_vault.try_lock() {
+                vault.lock();
+            }
             ui.pomodoro_awake.borrow_mut().take();
         }
     });

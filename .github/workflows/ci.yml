@@ -15,7 +15,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential pkg-config libgtk-4-dev libsqlite3-dev ripgrep gzip libvips-tools ffmpeg zbar-tools poppler-utils gnupg
+          sudo apt-get install --no-install-recommends -y build-essential pkg-config libgtk-4-dev libsqlite3-dev ripgrep gzip libvips-tools ffmpeg zbar-tools poppler-utils gnupg python3-gi
       - name: Install stable Rust with lint tools
         run: |
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
@@ -26,3 +26,4 @@ jobs:
       - run: cargo test --locked --all-targets
       - run: python3 tests/browser_data_test.py
       - run: python3 tests/systemtools_smoke.py
+      - run: python3 tests/deep_features_smoke.py
