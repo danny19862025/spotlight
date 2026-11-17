@@ -181,7 +181,9 @@ pub fn run_input(
     input: Option<&[u8]>,
 ) -> Result<String, String> {
     let program = command.get_program().to_string_lossy().into_owned();
-    let mut child = command
+    // Own process group, so a timeout also stops helpers the program started
+    // (for example the ssh that git clone runs).
+    let mut child = std::os::unix::process::CommandExt::process_group(command, 0)
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -224,6 +226,10 @@ pub fn run_input(
                 std::thread::sleep(Duration::from_millis(30))
             }
             _ => {
+                // The child is not reaped yet, so its PID (the group ID) cannot be reused.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("{program} timed out or was interrupted"));
@@ -859,5 +865,24 @@ mod tests {
         let started = Instant::now();
         assert!(run(Command::new("sleep").arg("10"), 0).is_err());
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+    #[test]
+    fn deadline_stops_descendants() {
+        let marker = std::env::temp_dir().join(format!("spotlight-group-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let script = format!("sleep 30 & echo $! > '{}'; wait", marker.display());
+        assert!(run(Command::new("sh").args(["-c", &script]), 1).is_err());
+        let pid: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        fs::remove_file(&marker).unwrap();
+        // The orphaned sleep is reaped by init shortly after SIGKILL.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "descendant {pid} survived the deadline"
+        );
     }
 }

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 project = Path(__file__).resolve().parents[1]
 if '--inside' not in sys.argv:
@@ -133,7 +134,12 @@ with tempfile.TemporaryDirectory(prefix='spotlight-features-',dir=fixture_parent
                 print('\n'.join(lines[i] for i in sorted(selected)))
             else:print(report,end='')
             assert not expired[0] and process.returncode==0, f'{name} failed'
-    calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()]
+    # Reveal starts dolphin without waiting, so give the stub time to log its call.
+    deadline=time.monotonic()+5
+    while True:
+        calls=[json.loads(line) for line in (root/'calls.jsonl').read_text().splitlines()]
+        if any(tool=='dolphin' for tool,_ in calls) or time.monotonic()>deadline:break
+        time.sleep(0.05)
     assert any(tool=='pkexec' and args[:3]==['apt-get','install','-y'] and args[-1]=='demo-app' for tool,args in calls)
     assert any(tool=='pkexec' and args[0]=='pacman' and args[-1]=='demo-app' for tool,args in calls)
     assert any(tool=='flatpak' and args[:2]==['install','--user'] and args[-1]=='org.example.Demo' for tool,args in calls)

@@ -607,7 +607,11 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(decode_qr(&bytes).unwrap().trim(), "Spotlight QR café");
+        if available("zbarimg") {
+            assert_eq!(decode_qr(&bytes).unwrap().trim(), "Spotlight QR café");
+        } else {
+            eprintln!("skipping QR decode check: zbarimg is not installed");
+        }
         let invisible = Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 7, 3).unwrap();
         invisible.fill(0xff000000);
         invisible.savev(&source, "png", &[]).unwrap();
